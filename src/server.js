@@ -217,7 +217,11 @@ async function handleStats(url, res) {
   }
 
   const stats = await getStats();
-  return sendJson(res, 200, { ok: true, stats });
+  if (url.searchParams.get("format") === "json") {
+    return sendJson(res, 200, { ok: true, stats });
+  }
+
+  return sendHtml(res, renderStats(stats, url.searchParams.get("password")));
 }
 
 function verifyMetaWebhook(url, res) {
@@ -234,6 +238,200 @@ function verifyMetaWebhook(url, res) {
   sendJson(res, 403, { error: "Meta webhook verification failed" });
 }
 
+function renderStats(stats, password) {
+  const byType = Array.isArray(stats.byType) ? stats.byType : [];
+  const maxCount = Math.max(1, ...byType.map((item) => item.count));
+  const recentEvents = Array.isArray(stats.recentEvents) ? stats.recentEvents : [];
+  const funnel = stats.funnel || {};
+
+  return `<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Stats | Instagram Telegram Gate</title>
+  <style>
+    :root {
+      --ink: #10202f;
+      --muted: #69788a;
+      --glass: rgba(255,255,255,.6);
+      --line: rgba(255,255,255,.66);
+      --blue: #1d5fd6;
+      --teal: #0f9f94;
+      --coral: #d96b4b;
+      --shadow: 0 22px 70px rgba(28, 48, 82, .18);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+      color: var(--ink);
+      background: linear-gradient(135deg, #eaf7f4 0%, #eef4ff 46%, #fff3ec 100%);
+    }
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background:
+        linear-gradient(90deg, rgba(255,255,255,.5), rgba(255,255,255,0) 42%, rgba(255,255,255,.38)),
+        repeating-linear-gradient(0deg, rgba(255,255,255,.14), rgba(255,255,255,.14) 1px, transparent 1px, transparent 18px);
+    }
+    main { width: min(1120px, calc(100% - 32px)); margin: 0 auto; padding: 30px 0 48px; position: relative; }
+    .topbar { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; margin-bottom: 18px; }
+    h1 { margin: 0; font-size: clamp(28px, 4vw, 44px); line-height: 1.04; letter-spacing: 0; }
+    .subtitle { color: var(--muted); margin: 8px 0 0; }
+    .nav { display: flex; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+    .nav a {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255,255,255,.56);
+      color: var(--ink);
+      padding: 10px 14px;
+      text-decoration: none;
+      box-shadow: 0 8px 24px rgba(28,48,82,.08);
+    }
+    .grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-bottom: 14px; }
+    .card, .panel {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--glass);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(22px) saturate(150%);
+      -webkit-backdrop-filter: blur(22px) saturate(150%);
+    }
+    .card { padding: 18px; min-height: 116px; }
+    .label { color: var(--muted); font-size: 13px; font-weight: 700; }
+    .value { margin-top: 12px; font-size: 34px; font-weight: 850; line-height: 1; }
+    .accent-blue { color: var(--blue); }
+    .accent-teal { color: var(--teal); }
+    .accent-coral { color: var(--coral); }
+    .layout { display: grid; grid-template-columns: 1.1fr .9fr; gap: 14px; }
+    .panel { padding: 18px; }
+    h2 { font-size: 16px; margin: 0 0 16px; letter-spacing: 0; }
+    .funnel { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+    .step {
+      border: 1px solid rgba(255,255,255,.62);
+      border-radius: 8px;
+      background: rgba(255,255,255,.42);
+      padding: 14px;
+    }
+    .step strong { display: block; font-size: 24px; margin-top: 8px; }
+    .bar-row { display: grid; grid-template-columns: minmax(160px, 1fr) 3fr 48px; align-items: center; gap: 12px; margin: 12px 0; }
+    .bar-label { color: var(--ink); overflow-wrap: anywhere; font-size: 13px; }
+    .bar-track { height: 10px; border-radius: 8px; background: rgba(255,255,255,.52); overflow: hidden; }
+    .bar-fill { height: 100%; border-radius: 8px; background: linear-gradient(90deg, var(--blue), var(--teal)); }
+    .bar-count { text-align: right; font-weight: 800; color: var(--muted); }
+    .events { display: grid; gap: 10px; }
+    .event {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+      padding: 11px 0;
+      border-top: 1px solid rgba(255,255,255,.58);
+    }
+    .event:first-child { border-top: 0; }
+    .event-type { font-weight: 800; overflow-wrap: anywhere; }
+    .event-time { color: var(--muted); font-size: 12px; white-space: nowrap; }
+    .event-meta { color: var(--muted); font-size: 12px; grid-column: 1 / -1; overflow-wrap: anywhere; }
+    @media (max-width: 900px) {
+      main { width: min(100% - 20px, 1120px); padding-top: 16px; }
+      .topbar { display: block; }
+      .nav { justify-content: flex-start; margin-top: 14px; }
+      .grid, .layout, .funnel { grid-template-columns: 1fr; }
+      .bar-row { grid-template-columns: 1fr; gap: 6px; }
+      .bar-count { text-align: left; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <div class="topbar">
+    <div>
+      <h1>Stats</h1>
+      <p class="subtitle">Живая картина по Instagram, Telegram и воронке доступа.</p>
+    </div>
+    <nav class="nav">
+      <a href="/admin">Admin</a>
+      <a href="/stats?password=${encodeURIComponent(password || "")}&format=json">JSON</a>
+    </nav>
+  </div>
+
+  <section class="grid">
+    ${metricCard("Всего событий", stats.totalEvents, "accent-blue")}
+    ${metricCard("За 24 часа", stats.events24h, "accent-teal")}
+    ${metricCard("Telegram users", stats.users, "accent-coral")}
+    ${metricCard("Instagram recipients", stats.instagramRecipients, "accent-blue")}
+  </section>
+
+  <section class="panel" style="margin-bottom:14px">
+    <h2>Воронка</h2>
+    <div class="funnel">
+      ${funnelStep("Комментарии", funnel.comments)}
+      ${funnelStep("Ответы Meta", funnel.repliesSent)}
+      ${funnelStep("Telegram start", funnel.telegramStarts)}
+      ${funnelStep("Проверки подписки", funnel.subscriptionChecks)}
+    </div>
+  </section>
+
+  <div class="layout">
+    <section class="panel">
+      <h2>События по типам</h2>
+      ${byType.length ? byType.map((item) => eventBar(item, maxCount)).join("") : `<p class="subtitle">Пока нет событий.</p>`}
+    </section>
+    <section class="panel">
+      <h2>Последние события</h2>
+      <div class="events">
+        ${recentEvents.length ? recentEvents.map(renderEvent).join("") : `<p class="subtitle">Пока нет последних событий.</p>`}
+      </div>
+    </section>
+  </div>
+</main>
+</body>
+</html>`;
+}
+
+function metricCard(label, value, accentClass) {
+  return `<div class="card"><div class="label">${esc(label)}</div><div class="value ${accentClass}">${Number(value || 0)}</div></div>`;
+}
+
+function funnelStep(label, value) {
+  return `<div class="step"><span class="label">${esc(label)}</span><strong>${Number(value || 0)}</strong></div>`;
+}
+
+function eventBar(item, maxCount) {
+  const width = Math.max(4, Math.round((item.count / maxCount) * 100));
+  return `<div class="bar-row">
+    <div class="bar-label">${esc(item.type)}</div>
+    <div class="bar-track"><div class="bar-fill" style="width:${width}%"></div></div>
+    <div class="bar-count">${Number(item.count || 0)}</div>
+  </div>`;
+}
+
+function renderEvent(event) {
+  const details = [event.label, event.status, event.subscribed === undefined ? "" : `subscribed=${event.subscribed}`, event.commentId, event.telegramId, event.instagramUserId]
+    .filter((item) => item !== undefined && item !== null && item !== "")
+    .join(" · ");
+  return `<div class="event">
+    <div class="event-type">${esc(event.type)}</div>
+    <div class="event-time">${esc(formatDate(event.createdAt))}</div>
+    ${details ? `<div class="event-meta">${esc(details)}</div>` : ""}
+  </div>`;
+}
+
+function formatDate(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleString("ru-RU", {
+    day: "2-digit",
+    month: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+}
+
 function renderAdmin(config) {
   const keywords = Array.isArray(config.instagram.keywords) ? config.instagram.keywords.join(", ") : "";
   return `<!doctype html>
@@ -243,91 +441,253 @@ function renderAdmin(config) {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Instagram Telegram Gate</title>
   <style>
-    body { margin: 0; font-family: Arial, sans-serif; background: #f4f6f8; color: #17202a; }
-    main { max-width: 920px; margin: 32px auto; padding: 0 16px 40px; }
-    h1 { font-size: 26px; margin: 0 0 18px; }
-    h2 { font-size: 18px; margin: 28px 0 12px; }
-    form { background: white; border: 1px solid #d9e0e7; border-radius: 8px; padding: 20px; }
-    label { display: block; font-weight: 700; margin: 14px 0 6px; }
-    input[type="text"], input[type="password"], textarea { width: 100%; box-sizing: border-box; border: 1px solid #b9c4d0; border-radius: 6px; padding: 10px; font: inherit; }
-    textarea { min-height: 92px; resize: vertical; }
-    .row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
-    .check { display: flex; gap: 8px; align-items: center; font-weight: 400; margin-top: 8px; }
-    button { margin-top: 22px; border: 0; border-radius: 6px; background: #175cd3; color: white; padding: 11px 16px; font: inherit; cursor: pointer; }
-    small { color: #5f6f7f; }
-    @media (max-width: 720px) { .row { grid-template-columns: 1fr; } main { margin-top: 18px; } }
+    :root {
+      --ink: #10202f;
+      --muted: #657487;
+      --line: rgba(255,255,255,.56);
+      --glass: rgba(255,255,255,.58);
+      --glass-strong: rgba(255,255,255,.76);
+      --blue: #1d5fd6;
+      --teal: #0f9f94;
+      --coral: #d96b4b;
+      --shadow: 0 22px 70px rgba(28, 48, 82, .18);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+      color: var(--ink);
+      background:
+        linear-gradient(135deg, #eaf7f4 0%, #eef4ff 42%, #fff3ec 100%);
+    }
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background:
+        linear-gradient(90deg, rgba(255,255,255,.48), rgba(255,255,255,0) 38%, rgba(255,255,255,.36)),
+        repeating-linear-gradient(0deg, rgba(255,255,255,.13), rgba(255,255,255,.13) 1px, transparent 1px, transparent 18px);
+    }
+    main { width: min(1120px, calc(100% - 32px)); margin: 0 auto; padding: 30px 0 46px; position: relative; }
+    .topbar {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: flex-start;
+      margin-bottom: 18px;
+    }
+    h1 { margin: 0; font-size: clamp(26px, 4vw, 42px); line-height: 1.04; letter-spacing: 0; }
+    .subtitle { margin: 8px 0 0; color: var(--muted); max-width: 660px; }
+    .nav { display: flex; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+    .nav a, button {
+      border: 1px solid rgba(255,255,255,.68);
+      border-radius: 8px;
+      background: rgba(255,255,255,.55);
+      color: var(--ink);
+      box-shadow: 0 8px 24px rgba(28,48,82,.08);
+      text-decoration: none;
+      padding: 10px 14px;
+      font: inherit;
+      cursor: pointer;
+    }
+    form {
+      border: 1px solid rgba(255,255,255,.72);
+      border-radius: 8px;
+      background: var(--glass);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(22px) saturate(150%);
+      -webkit-backdrop-filter: blur(22px) saturate(150%);
+      overflow: hidden;
+    }
+    .section { padding: 22px; border-top: 1px solid rgba(255,255,255,.58); }
+    .section:first-child { border-top: 0; }
+    h2 { font-size: 16px; margin: 0 0 16px; letter-spacing: 0; }
+    .row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+    .field { min-width: 0; }
+    label { display: block; font-weight: 700; font-size: 13px; margin: 0 0 7px; }
+    input[type="text"], input[type="password"], textarea {
+      width: 100%;
+      border: 1px solid rgba(42, 74, 104, .18);
+      border-radius: 8px;
+      background: rgba(255,255,255,.68);
+      color: var(--ink);
+      padding: 11px 12px;
+      font: inherit;
+      outline: none;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.8);
+    }
+    input:focus, textarea:focus { border-color: rgba(29,95,214,.55); box-shadow: 0 0 0 3px rgba(29,95,214,.13); }
+    textarea { min-height: 104px; resize: vertical; }
+    small { color: var(--muted); display: block; margin-top: 6px; }
+    .toggles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+    .toggle {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px;
+      border-radius: 8px;
+      border: 1px solid rgba(255,255,255,.64);
+      background: rgba(255,255,255,.45);
+      font-weight: 700;
+    }
+    .toggle input { inline-size: 42px; block-size: 23px; accent-color: var(--teal); }
+    .actions {
+      display: flex;
+      justify-content: space-between;
+      gap: 14px;
+      align-items: center;
+      padding: 18px 22px 22px;
+      border-top: 1px solid rgba(255,255,255,.58);
+    }
+    .save {
+      background: linear-gradient(135deg, var(--blue), var(--teal));
+      color: white;
+      border-color: rgba(255,255,255,.5);
+      font-weight: 800;
+      min-width: 170px;
+    }
+    .hint { color: var(--muted); font-size: 13px; }
+    @media (max-width: 860px) {
+      .topbar { display: block; }
+      .nav { justify-content: flex-start; margin-top: 14px; }
+      .row, .toggles { grid-template-columns: 1fr; }
+      main { width: min(100% - 20px, 1120px); padding-top: 16px; }
+      .actions { display: block; }
+      .save { width: 100%; margin-top: 12px; }
+    }
   </style>
 </head>
 <body>
 <main>
-  <h1>Instagram Telegram Gate</h1>
+  <div class="topbar">
+    <div>
+      <h1>Instagram Telegram Gate</h1>
+      <p class="subtitle">Панель сценария: комментарий или Direct в Instagram, переход в Telegram, проверка подписки и выдача лендинга.</p>
+    </div>
+    <nav class="nav">
+      <a data-auth-link="/stats?password=" href="/stats?password=">Stats</a>
+      <a data-auth-link="/telegram/webhook-info?password=" href="/telegram/webhook-info?password=">Telegram webhook</a>
+    </nav>
+  </div>
   <form method="post" action="/admin">
-    <label>Пароль админки</label>
-    <input name="password" type="password" required>
+    <section class="section">
+      <h2>Доступ</h2>
+      <div class="row">
+        <div class="field">
+          <label>Пароль админки</label>
+          <input id="adminPassword" name="password" type="password" required>
+        </div>
+        <div class="field">
+          <label>Ссылка на лендинг</label>
+          <input name="landingUrl" type="text" value="${esc(config.landingUrl)}">
+        </div>
+        <div class="field">
+          <label>Ключевые слова</label>
+          <input name="keywords" type="text" value="${esc(keywords)}">
+          <small>Пусто = реагировать на все комментарии.</small>
+        </div>
+      </div>
+    </section>
 
-    <h2>Основное</h2>
-    <label>Ссылка на лендинг</label>
-    <input name="landingUrl" type="text" value="${esc(config.landingUrl)}">
+    <section class="section">
+      <h2>Telegram</h2>
+      <div class="row">
+        <div class="field">
+          <label>Канал для проверки</label>
+          <input name="channelUsername" type="text" value="${esc(config.telegram.channelUsername)}">
+        </div>
+        <div class="field">
+          <label>Start payload</label>
+          <input name="startPayload" type="text" value="${esc(config.telegram.startPayload)}">
+        </div>
+        <div class="field">
+          <label>Кнопка лендинга</label>
+          <input name="tgLandingButton" type="text" value="${esc(config.telegramTexts.landingButton)}">
+        </div>
+      </div>
+    </section>
 
-    <div class="row">
-      <div>
-        <label>Telegram канал</label>
-        <input name="channelUsername" type="text" value="${esc(config.telegram.channelUsername)}">
+    <section class="section">
+      <h2>Триггеры Instagram</h2>
+      <div class="toggles">
+        <label class="toggle">Комментарии <input name="comments" type="checkbox" ${checked(config.instagram.enabledTriggers.comments)}></label>
+        <label class="toggle">Direct <input name="directMessages" type="checkbox" ${checked(config.instagram.enabledTriggers.directMessages)}></label>
+        <label class="toggle">Share/Repost <input name="shares" type="checkbox" ${checked(config.instagram.enabledTriggers.shares)}></label>
+        <label class="toggle">Публичный ответ <input name="publicReplyEnabled" type="checkbox" ${checked(config.instagram.publicReplyEnabled === true)}></label>
       </div>
-      <div>
-        <label>Start payload</label>
-        <input name="startPayload" type="text" value="${esc(config.telegram.startPayload)}">
+    </section>
+
+    <section class="section">
+      <h2>Instagram сообщения</h2>
+      <div class="row">
+        <div class="field">
+          <label>Текст Direct</label>
+          <textarea name="directText">${esc(config.instagram.directMessage.text)}</textarea>
+        </div>
+        <div class="field">
+          <label>Текст кнопки в Instagram</label>
+          <input name="directButtonText" type="text" value="${esc(config.instagram.directMessage.buttonText)}">
+          <small>Кнопка ведет в Telegram-бота.</small>
+        </div>
+        <div class="field">
+          <label>Публичный ответ на комментарий</label>
+          <input name="publicCommentReply" type="text" value="${esc(config.instagram.publicCommentReply)}">
+          <small>Лучше держать выключенным, чтобы не плодить ответы.</small>
+        </div>
       </div>
-      <div>
-        <label>Ключевые слова</label>
-        <input name="keywords" type="text" value="${esc(keywords)}">
-        <small>Пусто = реагировать на все</small>
+    </section>
+
+    <section class="section">
+      <h2>Telegram тексты</h2>
+      <div class="row">
+        <div class="field">
+          <label>Приветствие</label>
+          <textarea name="tgWelcome">${esc(config.telegramTexts.welcome)}</textarea>
+        </div>
+        <div class="field">
+          <label>Если не подписан</label>
+          <textarea name="tgNotSubscribed">${esc(config.telegramTexts.notSubscribed)}</textarea>
+        </div>
+        <div class="field">
+          <label>Если подписан</label>
+          <textarea name="tgSubscribed">${esc(config.telegramTexts.subscribed)}</textarea>
+        </div>
       </div>
+      <div class="row" style="margin-top:14px">
+        <div class="field">
+          <label>Кнопка проверки</label>
+          <input name="tgCheckButton" type="text" value="${esc(config.telegramTexts.checkButton)}">
+        </div>
+        <div class="field">
+          <label>Кнопка канала</label>
+          <input name="tgChannelButton" type="text" value="${esc(config.telegramTexts.channelButton)}">
+        </div>
+        <div class="field">
+          <label>Кнопка лендинга</label>
+          <input name="tgLandingButton" type="text" value="${esc(config.telegramTexts.landingButton)}">
+        </div>
+      </div>
+    </section>
+
+    <div class="actions">
+      <div class="hint">Настройки сохраняются в MongoDB Atlas, если MONGODB_URI настроен в Vercel.</div>
+      <button class="save" type="submit">Сохранить</button>
     </div>
-
-    <h2>Триггеры Instagram</h2>
-    <label class="check"><input name="comments" type="checkbox" ${checked(config.instagram.enabledTriggers.comments)}> Комментарии</label>
-    <label class="check"><input name="directMessages" type="checkbox" ${checked(config.instagram.enabledTriggers.directMessages)}> Сообщения в Direct</label>
-    <label class="check"><input name="shares" type="checkbox" ${checked(config.instagram.enabledTriggers.shares)}> Share/repost в Direct</label>
-    <label class="check"><input name="publicReplyEnabled" type="checkbox" ${checked(config.instagram.publicReplyEnabled === true)}> Публично отвечать под комментарием</label>
-
-    <label>Публичный ответ на комментарий</label>
-    <input name="publicCommentReply" type="text" value="${esc(config.instagram.publicCommentReply)}">
-
-    <label>Текст Instagram Direct</label>
-    <textarea name="directText">${esc(config.instagram.directMessage.text)}</textarea>
-
-    <label>Текст кнопки в Instagram</label>
-    <input name="directButtonText" type="text" value="${esc(config.instagram.directMessage.buttonText)}">
-
-    <h2>Тексты Telegram</h2>
-    <label>Приветствие</label>
-    <textarea name="tgWelcome">${esc(config.telegramTexts.welcome)}</textarea>
-
-    <label>Если не подписан</label>
-    <textarea name="tgNotSubscribed">${esc(config.telegramTexts.notSubscribed)}</textarea>
-
-    <label>Если подписан</label>
-    <textarea name="tgSubscribed">${esc(config.telegramTexts.subscribed)}</textarea>
-
-    <div class="row">
-      <div>
-        <label>Кнопка проверки</label>
-        <input name="tgCheckButton" type="text" value="${esc(config.telegramTexts.checkButton)}">
-      </div>
-      <div>
-        <label>Кнопка канала</label>
-        <input name="tgChannelButton" type="text" value="${esc(config.telegramTexts.channelButton)}">
-      </div>
-      <div>
-        <label>Кнопка лендинга</label>
-        <input name="tgLandingButton" type="text" value="${esc(config.telegramTexts.landingButton)}">
-      </div>
-    </div>
-
-    <button type="submit">Сохранить</button>
   </form>
 </main>
+<script>
+  const passwordInput = document.getElementById("adminPassword");
+  const authLinks = Array.from(document.querySelectorAll("[data-auth-link]"));
+  function syncAuthLinks() {
+    const value = encodeURIComponent(passwordInput.value || "");
+    for (const link of authLinks) link.href = link.dataset.authLink + value;
+  }
+  passwordInput.addEventListener("input", syncAuthLinks);
+  syncAuthLinks();
+</script>
 </body>
 </html>`;
 }

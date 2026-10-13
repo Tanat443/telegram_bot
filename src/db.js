@@ -133,7 +133,7 @@ export async function getStats() {
 
   await ensureIndexes(db);
   const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
-  const [totalEvents, events24h, users, instagramRecipients, byType] = await Promise.all([
+  const [totalEvents, events24h, users, instagramRecipients, byType, recentEvents] = await Promise.all([
     db.collection("events").countDocuments(),
     db.collection("events").countDocuments({ createdAt: { $gte: since24h } }),
     db.collection("telegram_users").countDocuments(),
@@ -141,7 +141,12 @@ export async function getStats() {
     db.collection("events").aggregate([
       { $group: { _id: "$type", count: { $sum: 1 } } },
       { $sort: { count: -1 } }
-    ]).toArray()
+    ]).toArray(),
+    db.collection("events")
+      .find({}, { projection: { type: 1, createdAt: 1, label: 1, status: 1, subscribed: 1, commentId: 1, telegramId: 1, instagramUserId: 1 } })
+      .sort({ createdAt: -1 })
+      .limit(12)
+      .toArray()
   ]);
 
   return {
@@ -149,8 +154,23 @@ export async function getStats() {
     events24h,
     users,
     instagramRecipients,
-    byType: byType.map((item) => ({ type: item._id, count: item.count }))
+    byType: byType.map((item) => ({ type: item._id, count: item.count })),
+    funnel: {
+      comments: countType(byType, "instagram_comment_received"),
+      repliesSent: countType(byType, "meta_api_sent"),
+      telegramStarts: countType(byType, "telegram_started"),
+      subscriptionChecks: countType(byType, "telegram_subscription_checked")
+    },
+    recentEvents: recentEvents.map((event) => ({
+      ...event,
+      _id: String(event._id),
+      createdAt: event.createdAt?.toISOString?.() || event.createdAt
+    }))
   };
+}
+
+function countType(items, type) {
+  return items.find((item) => item._id === type)?.count || 0;
 }
 
 let indexesEnsured = false;
