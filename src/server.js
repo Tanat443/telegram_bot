@@ -34,15 +34,32 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true, service: "instagram-telegram-gate" });
     }
 
+    if (req.method === "GET" && url.pathname === "/api/ping") {
+      return sendJson(res, 200, {
+        ok: true,
+        service: "instagram-telegram-gate",
+        route: "/api/ping"
+      });
+    }
+
     if (url.pathname === "/admin") {
       return handleAdmin(req, res);
     }
 
-    if (req.method === "GET" && url.pathname === "/webhooks/meta") {
+    if (req.method === "GET" && isMetaWebhookPath(url.pathname) && url.searchParams.get("debug") === "1") {
+      return sendJson(res, 200, {
+        ok: true,
+        hasVerifyToken: Boolean(getEnv("META_VERIFY_TOKEN")),
+        graphBaseUrl: getEnv("META_GRAPH_BASE_URL", "https://graph.instagram.com"),
+        apiVersion: getEnv("META_API_VERSION", "v24.0")
+      });
+    }
+
+    if (req.method === "GET" && isMetaWebhookPath(url.pathname)) {
       return verifyMetaWebhook(url, res);
     }
 
-    if (req.method === "POST" && url.pathname === "/webhooks/meta") {
+    if (req.method === "POST" && isMetaWebhookPath(url.pathname)) {
       const body = await readJson(req);
       await meta.handleWebhook(body);
       return sendJson(res, 200, { ok: true });
@@ -61,6 +78,10 @@ server.listen(port, () => {
 });
 
 telegram.startPolling();
+
+function isMetaWebhookPath(pathname) {
+  return pathname === "/webhooks/meta" || pathname === "/api/webhooks/meta";
+}
 
 async function handleAdmin(req, res) {
   if (req.method === "GET") {
