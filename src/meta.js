@@ -8,6 +8,8 @@ export class MetaClient {
   }
 
   async handleWebhook(body) {
+    console.log("Meta webhook received:", JSON.stringify(summarizeWebhook(body)));
+
     const config = await this.configProvider();
     const entries = Array.isArray(body.entry) ? body.entry : [];
 
@@ -117,4 +119,23 @@ export class MetaClient {
     }
     console.log("Meta API sent:", JSON.stringify(data));
   }
+}
+
+function summarizeWebhook(body) {
+  const entries = Array.isArray(body?.entry) ? body.entry : [];
+  return {
+    object: body?.object,
+    entryCount: entries.length,
+    entries: entries.map((entry) => ({
+      id: entry.id,
+      time: entry.time,
+      changes: Array.isArray(entry.changes)
+        ? entry.changes.map((change) => ({
+            field: change.field,
+            valueKeys: change.value ? Object.keys(change.value) : []
+          }))
+        : [],
+      messagingCount: Array.isArray(entry.messaging) ? entry.messaging.length : 0
+    }))
+  };
 }
