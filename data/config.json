@@ -4,6 +4,9 @@
     "channelUsername": "@test_tanat",
     "startPayload": "ig"
   },
+  "telegramMedia": {
+    "welcomeImageId": ""
+  },
   "instagram": {
     "enabledTriggers": {
       "comments": true,

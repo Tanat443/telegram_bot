@@ -170,3 +170,30 @@ Telegram-side users and subscription checks.
 3. On admin save, write both `config` and `message_templates`.
 4. Once stable, read texts from `message_templates` and keep `config` only for global settings.
 5. Add `campaigns` when multiple posts/Reels or multiple funnels are needed.
+
+## Media Storage
+
+Uploaded admin images are stored in MongoDB GridFS using the `media` bucket:
+
+```text
+media.files
+media.chunks
+```
+
+The current MVP stores the Telegram welcome image ID in:
+
+```json
+{
+  "config.value.telegramMedia": {
+    "welcomeImageId": "..."
+  }
+}
+```
+
+The app serves images through:
+
+```text
+/media/:id
+```
+
+Telegram receives this public URL in `sendPhoto`. This keeps Vercel stateless and avoids storing uploaded files on its read-only filesystem.

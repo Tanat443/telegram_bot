@@ -73,6 +73,8 @@ Telegram на Vercel должен работать через webhook, не че
 
 `https://your-vercel-project.vercel.app/stats?password=YOUR_ADMIN_PASSWORD`
 
+Картинки, загруженные в админке, хранятся в MongoDB GridFS и отдаются через `/media/:id`.
+
 ## Telegram
 
 Бот должен быть админом канала `@test_tanat`, иначе Telegram не даст проверить статус подписки через `getChatMember`.

@@ -1,4 +1,4 @@
-import { MongoClient } from "mongodb";
+import { GridFSBucket, MongoClient, ObjectId } from "mongodb";
 
 let clientPromise;
 
@@ -16,6 +16,11 @@ export async function getDb() {
 
   const client = await clientPromise;
   return client.db(process.env.MONGODB_DB || "instagram_telegram_gate");
+}
+
+export function toObjectId(id) {
+  if (!ObjectId.isValid(id)) return null;
+  return new ObjectId(id);
 }
 
 export async function getStoredConfig() {
@@ -166,6 +171,37 @@ export async function getStats() {
       _id: String(event._id),
       createdAt: event.createdAt?.toISOString?.() || event.createdAt
     }))
+  };
+}
+
+export async function saveMediaFile({ buffer, filename, contentType, metadata = {} }) {
+  const db = await getDb();
+  if (!db) return null;
+
+  const bucket = new GridFSBucket(db, { bucketName: "media" });
+  return new Promise((resolve, reject) => {
+    const upload = bucket.openUploadStream(filename || "upload", {
+      contentType,
+      metadata
+    });
+    upload.on("error", reject);
+    upload.on("finish", () => resolve(String(upload.id)));
+    upload.end(buffer);
+  });
+}
+
+export async function getMediaFile(id) {
+  const db = await getDb();
+  const objectId = toObjectId(id);
+  if (!db || !objectId) return null;
+
+  const file = await db.collection("media.files").findOne({ _id: objectId });
+  if (!file) return null;
+
+  const bucket = new GridFSBucket(db, { bucketName: "media" });
+  return {
+    file,
+    stream: bucket.openDownloadStream(objectId)
   };
 }
 

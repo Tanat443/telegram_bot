@@ -88,17 +88,32 @@ export class TelegramBot {
         chatId: message.chat.id,
         text
       });
-      await this.api("sendMessage", {
-        chat_id: message.chat.id,
-        text: config.telegramTexts.welcome,
-        reply_markup: this.subscriptionKeyboard(config)
-      });
+      await this.sendWelcome(message.chat.id, config);
       return;
     }
 
     await this.api("sendMessage", {
       chat_id: message.chat.id,
       text: "Нажмите /start, чтобы получить доступ."
+    });
+  }
+
+  async sendWelcome(chatId, config) {
+    const imageId = config.telegramMedia?.welcomeImageId;
+    if (imageId && process.env.PUBLIC_BASE_URL) {
+      await this.api("sendPhoto", {
+        chat_id: chatId,
+        photo: `${normalizeUrl(process.env.PUBLIC_BASE_URL).replace(/\/$/, "")}/media/${imageId}`,
+        caption: truncateCaption(config.telegramTexts.welcome),
+        reply_markup: this.subscriptionKeyboard(config)
+      });
+      return;
+    }
+
+    await this.api("sendMessage", {
+      chat_id: chatId,
+      text: config.telegramTexts.welcome,
+      reply_markup: this.subscriptionKeyboard(config)
     });
   }
 
@@ -167,4 +182,9 @@ export class TelegramBot {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function truncateCaption(text) {
+  const value = String(text || "");
+  return value.length > 1024 ? `${value.slice(0, 1021)}...` : value;
 }

@@ -11,6 +11,7 @@
     "node": ">=20"
   },
   "dependencies": {
+    "busboy": "^1.6.0",
     "mongodb": "^7.7.0"
   }
 }

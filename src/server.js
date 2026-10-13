@@ -1,7 +1,8 @@
 import http from "node:http";
+import Busboy from "busboy";
 import { URL } from "node:url";
 import { getEnv, loadDotEnv, normalizeUrl, readConfig, requireEnv, writeConfig } from "./config.js";
-import { getStats, hasMongo } from "./db.js";
+import { getMediaFile, getStats, hasMongo, saveMediaFile } from "./db.js";
 import { MetaClient } from "./meta.js";
 import { TelegramBot } from "./telegram.js";
 
@@ -42,6 +43,10 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "GET" && url.pathname === "/terms") {
       return sendHtml(res, renderTerms());
+    }
+
+    if (req.method === "GET" && url.pathname.startsWith("/media/")) {
+      return handleMedia(url, res);
     }
 
     if (req.method === "GET" && url.pathname === "/api/ping") {
@@ -173,7 +178,7 @@ async function handleAdmin(req, res) {
   }
 
   if (req.method === "POST") {
-    const form = await readForm(req);
+    const { fields: form, files } = await readFormData(req);
     if (form.password !== adminPassword) {
       return sendHtml(res, renderMessage("Неверный пароль", "/admin"), 401);
     }
@@ -196,12 +201,46 @@ async function handleAdmin(req, res) {
     config.telegramTexts.checkButton = form.tgCheckButton;
     config.telegramTexts.channelButton = form.tgChannelButton;
     config.telegramTexts.landingButton = form.tgLandingButton;
+    config.telegramMedia = config.telegramMedia || {};
+
+    if (form.removeWelcomeImage === "on") {
+      config.telegramMedia.welcomeImageId = "";
+    }
+
+    if (files.welcomeImage?.buffer?.length) {
+      if (!files.welcomeImage.contentType?.startsWith("image/")) {
+        return sendHtml(res, renderMessage("Можно загрузить только изображение", "/admin"), 400);
+      }
+      if (files.welcomeImage.buffer.length > 4 * 1024 * 1024) {
+        return sendHtml(res, renderMessage("Картинка слишком большая. Максимум 4 MB", "/admin"), 400);
+      }
+
+      const imageId = await saveMediaFile({
+        buffer: files.welcomeImage.buffer,
+        filename: files.welcomeImage.filename,
+        contentType: files.welcomeImage.contentType,
+        metadata: { purpose: "telegram_welcome" }
+      });
+      if (imageId) config.telegramMedia.welcomeImageId = imageId;
+    }
 
     await writeConfig(config);
     return sendHtml(res, renderMessage("Настройки сохранены", "/admin"));
   }
 
   return sendJson(res, 405, { error: "Method not allowed" });
+}
+
+async function handleMedia(url, res) {
+  const id = url.pathname.replace("/media/", "").trim();
+  const media = await getMediaFile(id);
+  if (!media) return sendJson(res, 404, { error: "Media not found" });
+
+  res.writeHead(200, {
+    "content-type": media.file.contentType || "application/octet-stream",
+    "cache-control": "public, max-age=31536000, immutable"
+  });
+  media.stream.pipe(res);
 }
 
 async function handleStats(url, res) {
@@ -403,21 +442,56 @@ function funnelStep(label, value) {
 function eventBar(item, maxCount) {
   const width = Math.max(4, Math.round((item.count / maxCount) * 100));
   return `<div class="bar-row">
-    <div class="bar-label">${esc(item.type)}</div>
+    <div class="bar-label">${esc(eventTitle(item.type))}</div>
     <div class="bar-track"><div class="bar-fill" style="width:${width}%"></div></div>
     <div class="bar-count">${Number(item.count || 0)}</div>
   </div>`;
 }
 
 function renderEvent(event) {
-  const details = [event.label, event.status, event.subscribed === undefined ? "" : `subscribed=${event.subscribed}`, event.commentId, event.telegramId, event.instagramUserId]
+  const details = [
+    event.label ? actionTitle(event.label) : "",
+    event.status ? `Статус: ${event.status}` : "",
+    event.subscribed === undefined ? "" : (event.subscribed ? "Подписка подтверждена" : "Подписки нет"),
+    event.commentId ? `Комментарий: ${event.commentId}` : "",
+    event.telegramId ? `Telegram ID: ${event.telegramId}` : "",
+    event.instagramUserId ? `Instagram ID: ${event.instagramUserId}` : ""
+  ]
     .filter((item) => item !== undefined && item !== null && item !== "")
     .join(" · ");
   return `<div class="event">
-    <div class="event-type">${esc(event.type)}</div>
+    <div class="event-type">${esc(eventTitle(event.type))}</div>
     <div class="event-time">${esc(formatDate(event.createdAt))}</div>
     ${details ? `<div class="event-meta">${esc(details)}</div>` : ""}
   </div>`;
+}
+
+function eventTitle(type) {
+  const titles = {
+    meta_webhook_received: "Webhook от Instagram получен",
+    instagram_comment_received: "Новый комментарий в Instagram",
+    instagram_comment_reply_skipped: "Ответ на комментарий пропущен",
+    instagram_comment_duplicate_skipped: "Дубликат комментария пропущен",
+    instagram_direct_message_received: "Сообщение в Instagram Direct",
+    instagram_recipient_duplicate_skipped: "Пользователь уже получал сообщение",
+    meta_api_sent: "Ответ отправлен через Meta",
+    meta_api_failed: "Ошибка отправки через Meta",
+    meta_api_skipped: "Meta-запрос пропущен",
+    telegram_update_received: "Событие от Telegram получено",
+    telegram_started: "Пользователь открыл Telegram-бота",
+    telegram_subscription_checked: "Проверка подписки в Telegram"
+  };
+  return titles[type] || type;
+}
+
+function actionTitle(label) {
+  const titles = {
+    "private reply": "Direct-ответ на комментарий",
+    "public comment reply": "Публичный ответ под комментарием",
+    "direct message": "Ответ в Direct",
+    "Meta API request": "Запрос к Meta"
+  };
+  return titles[label] || label;
 }
 
 function formatDate(value) {
@@ -434,6 +508,8 @@ function formatDate(value) {
 
 function renderAdmin(config) {
   const keywords = Array.isArray(config.instagram.keywords) ? config.instagram.keywords.join(", ") : "";
+  const welcomeImageId = config.telegramMedia?.welcomeImageId || "";
+  const welcomeImageUrl = welcomeImageId ? `/media/${welcomeImageId}` : "";
   return `<!doctype html>
 <html lang="ru">
 <head>
@@ -572,7 +648,7 @@ function renderAdmin(config) {
       <a data-auth-link="/telegram/webhook-info?password=" href="/telegram/webhook-info?password=">Telegram webhook</a>
     </nav>
   </div>
-  <form method="post" action="/admin">
+  <form method="post" action="/admin" enctype="multipart/form-data">
     <section class="section">
       <h2>Доступ</h2>
       <div class="row">
@@ -646,6 +722,7 @@ function renderAdmin(config) {
         <div class="field">
           <label>Приветствие</label>
           <textarea name="tgWelcome">${esc(config.telegramTexts.welcome)}</textarea>
+          <small>Можно отправлять как текст или как подпись к картинке.</small>
         </div>
         <div class="field">
           <label>Если не подписан</label>
@@ -654,6 +731,20 @@ function renderAdmin(config) {
         <div class="field">
           <label>Если подписан</label>
           <textarea name="tgSubscribed">${esc(config.telegramTexts.subscribed)}</textarea>
+        </div>
+      </div>
+      <div class="row" style="margin-top:14px">
+        <div class="field">
+          <label>Картинка приветствия</label>
+          <input name="welcomeImage" type="file" accept="image/*">
+          <small>Хранится в MongoDB GridFS. Максимум 4 MB.</small>
+        </div>
+        <div class="field">
+          <label>Текущая картинка</label>
+          ${welcomeImageUrl ? `<img src="${esc(welcomeImageUrl)}" alt="Welcome image" style="width:100%;max-height:180px;object-fit:cover;border-radius:8px;border:1px solid rgba(255,255,255,.7)">` : `<div class="hint">Картинка не загружена.</div>`}
+        </div>
+        <div class="field">
+          <label class="toggle" style="margin-top:22px">Удалить картинку <input name="removeWelcomeImage" type="checkbox"></label>
         </div>
       </div>
       <div class="row" style="margin-top:14px">
@@ -810,6 +901,53 @@ async function readJson(req) {
 async function readForm(req) {
   const text = await readText(req);
   return Object.fromEntries(new URLSearchParams(text));
+}
+
+async function readFormData(req) {
+  const contentType = req.headers["content-type"] || "";
+  if (!contentType.includes("multipart/form-data")) {
+    return {
+      fields: await readForm(req),
+      files: {}
+    };
+  }
+
+  return new Promise((resolve, reject) => {
+    const fields = {};
+    const files = {};
+    const busboy = Busboy({
+      headers: req.headers,
+      limits: {
+        fileSize: 4 * 1024 * 1024,
+        files: 4,
+        fields: 80
+      }
+    });
+
+    busboy.on("field", (name, value) => {
+      fields[name] = value;
+    });
+
+    busboy.on("file", (name, file, info) => {
+      const chunks = [];
+      file.on("data", (chunk) => chunks.push(chunk));
+      file.on("limit", () => reject(new Error("Uploaded file is too large")));
+      file.on("end", () => {
+        const buffer = Buffer.concat(chunks);
+        if (buffer.length > 0) {
+          files[name] = {
+            buffer,
+            filename: info.filename,
+            contentType: info.mimeType
+          };
+        }
+      });
+    });
+
+    busboy.on("error", reject);
+    busboy.on("finish", () => resolve({ fields, files }));
+    req.pipe(busboy);
+  });
 }
 
 function readText(req) {
