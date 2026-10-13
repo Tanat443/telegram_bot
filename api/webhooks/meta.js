@@ -4,6 +4,16 @@ import { readConfig } from "../../src/config.js";
 const verifyToken = process.env.META_VERIFY_TOKEN || "verify-token";
 
 export default async function handler(req, res) {
+  if (req.method === "GET" && req.query.debug === "1") {
+    res.status(200).json({
+      ok: true,
+      hasVerifyToken: Boolean(process.env.META_VERIFY_TOKEN),
+      graphBaseUrl: process.env.META_GRAPH_BASE_URL || "https://graph.instagram.com",
+      apiVersion: process.env.META_API_VERSION || "v24.0"
+    });
+    return;
+  }
+
   if (req.method === "GET") {
     const mode = req.query["hub.mode"];
     const token = req.query["hub.verify_token"];
