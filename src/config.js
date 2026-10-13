@@ -28,15 +28,18 @@ export function loadDotEnv() {
 }
 
 export async function readConfig() {
+  let config;
   try {
     const runtimeContent = await fs.readFile(runtimeConfigPath, "utf8");
-    return JSON.parse(runtimeContent);
+    config = JSON.parse(runtimeContent);
+    return applyEnvOverrides(config);
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
   }
 
   const content = await fs.readFile(configPath, "utf8");
-  return JSON.parse(content);
+  config = JSON.parse(content);
+  return applyEnvOverrides(config);
 }
 
 export async function writeConfig(config) {
@@ -67,4 +70,14 @@ export function normalizeUrl(url) {
   if (!url) return "";
   if (/^https?:\/\//i.test(url)) return url;
   return `https://${url}`;
+}
+
+function applyEnvOverrides(config) {
+  if (process.env.TELEGRAM_CHANNEL_USERNAME) {
+    config.telegram.channelUsername = process.env.TELEGRAM_CHANNEL_USERNAME;
+  }
+  if (process.env.LANDING_URL) {
+    config.landingUrl = normalizeUrl(process.env.LANDING_URL);
+  }
+  return config;
 }

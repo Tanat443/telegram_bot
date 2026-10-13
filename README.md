@@ -47,6 +47,7 @@ Verify token должен совпадать с `META_VERIFY_TOKEN`.
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_BOT_USERNAME`
 - `TELEGRAM_CHANNEL_USERNAME`
+- `TELEGRAM_WEBHOOK_SECRET`
 - `META_VERIFY_TOKEN`
 - `META_ACCESS_TOKEN`
 - `META_API_VERSION`
@@ -57,6 +58,14 @@ Verify token должен совпадать с `META_VERIFY_TOKEN`.
 `https://your-vercel-project.vercel.app/webhooks/meta`
 
 Значение поля "Подтверждение маркера" в Meta должно быть ровно таким же, как `META_VERIFY_TOKEN` в Vercel.
+
+Telegram на Vercel должен работать через webhook, не через long polling. После деплоя откройте:
+
+`https://your-vercel-project.vercel.app/telegram/set-webhook?password=YOUR_ADMIN_PASSWORD`
+
+Проверить состояние Telegram webhook:
+
+`https://your-vercel-project.vercel.app/telegram/webhook-info?password=YOUR_ADMIN_PASSWORD`
 
 ## Telegram
 

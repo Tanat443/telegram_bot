@@ -9,6 +9,7 @@ await loadDotEnv();
 const port = Number(getEnv("PORT", "3000"));
 const adminPassword = getEnv("ADMIN_PASSWORD", "admin");
 const verifyToken = getEnv("META_VERIFY_TOKEN", "verify-token");
+const telegramWebhookSecret = getEnv("TELEGRAM_WEBHOOK_SECRET");
 
 const telegram = new TelegramBot({
   token: requireEnv("TELEGRAM_BOT_TOKEN"),
@@ -54,6 +55,14 @@ const server = http.createServer(async (req, res) => {
       return handleAdmin(req, res);
     }
 
+    if (req.method === "GET" && url.pathname === "/telegram/set-webhook") {
+      return setTelegramWebhook(url, req, res);
+    }
+
+    if (req.method === "GET" && url.pathname === "/telegram/webhook-info") {
+      return getTelegramWebhookInfo(url, res);
+    }
+
     if (req.method === "GET" && isMetaWebhookPath(url.pathname) && url.searchParams.get("debug") === "1") {
       return sendJson(res, 200, {
         ok: true,
@@ -73,6 +82,23 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true });
     }
 
+    if (req.method === "GET" && isTelegramWebhookPath(url.pathname)) {
+      return sendJson(res, 200, {
+        ok: true,
+        route: url.pathname,
+        hasWebhookSecret: Boolean(telegramWebhookSecret)
+      });
+    }
+
+    if (req.method === "POST" && isTelegramWebhookPath(url.pathname)) {
+      if (telegramWebhookSecret && req.headers["x-telegram-bot-api-secret-token"] !== telegramWebhookSecret) {
+        return sendJson(res, 403, { error: "Telegram webhook secret mismatch" });
+      }
+      const body = await readJson(req);
+      await telegram.handleUpdate(body);
+      return sendJson(res, 200, { ok: true });
+    }
+
     return sendJson(res, 404, { error: "Not found" });
   } catch (error) {
     console.error(error);
@@ -85,10 +111,54 @@ server.listen(port, () => {
   console.log(`Admin UI: http://localhost:${port}/admin`);
 });
 
-telegram.startPolling();
+if (shouldUseTelegramPolling()) {
+  telegram.startPolling();
+} else {
+  console.log("Telegram polling disabled; use /webhooks/telegram.");
+}
 
 function isMetaWebhookPath(pathname) {
   return pathname === "/webhooks/meta" || pathname === "/api/webhooks/meta";
+}
+
+function isTelegramWebhookPath(pathname) {
+  return pathname === "/webhooks/telegram" || pathname === "/api/webhooks/telegram";
+}
+
+function shouldUseTelegramPolling() {
+  const explicit = getEnv("TELEGRAM_USE_POLLING");
+  if (explicit) return explicit === "true";
+  return getEnv("VERCEL") !== "1";
+}
+
+async function setTelegramWebhook(url, req, res) {
+  if (url.searchParams.get("password") !== adminPassword) {
+    return sendJson(res, 401, { error: "Unauthorized" });
+  }
+
+  const baseUrl = getEnv("PUBLIC_BASE_URL") || `https://${req.headers.host}`;
+  const webhookUrl = `${normalizeUrl(baseUrl).replace(/\/$/, "")}/webhooks/telegram`;
+  const payload = {
+    url: webhookUrl,
+    allowed_updates: ["message", "callback_query"],
+    drop_pending_updates: true
+  };
+
+  if (telegramWebhookSecret) {
+    payload.secret_token = telegramWebhookSecret;
+  }
+
+  const result = await telegram.api("setWebhook", payload);
+  return sendJson(res, 200, { ok: true, webhookUrl, result });
+}
+
+async function getTelegramWebhookInfo(url, res) {
+  if (url.searchParams.get("password") !== adminPassword) {
+    return sendJson(res, 401, { error: "Unauthorized" });
+  }
+
+  const info = await telegram.api("getWebhookInfo");
+  return sendJson(res, 200, { ok: true, info });
 }
 
 async function handleAdmin(req, res) {

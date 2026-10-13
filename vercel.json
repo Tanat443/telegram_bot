@@ -3,6 +3,10 @@
     {
       "source": "/webhooks/meta",
       "destination": "/api/webhooks/meta"
+    },
+    {
+      "source": "/webhooks/telegram",
+      "destination": "/api/webhooks/telegram"
     }
   ]
 }

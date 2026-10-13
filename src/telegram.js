@@ -56,6 +56,13 @@ export class TelegramBot {
   }
 
   async handleUpdate(update) {
+    console.log("Telegram update received:", JSON.stringify({
+      updateId: update.update_id,
+      hasMessage: Boolean(update.message),
+      hasCallback: Boolean(update.callback_query),
+      callbackData: update.callback_query?.data
+    }));
+
     if (update.message) return this.handleMessage(update.message);
     if (update.callback_query) return this.handleCallback(update.callback_query);
   }
@@ -64,6 +71,7 @@ export class TelegramBot {
     const text = message.text || "";
     if (text.startsWith("/start")) {
       const config = await this.configProvider();
+      console.log(`Telegram /start from ${message.from?.id}`);
       await this.api("sendMessage", {
         chat_id: message.chat.id,
         text: config.telegramTexts.welcome,
@@ -85,6 +93,7 @@ export class TelegramBot {
     await this.api("answerCallbackQuery", { callback_query_id: callback.id });
     const userId = callback.from.id;
     const subscribed = await this.isSubscribed(config.telegram.channelUsername, userId);
+    console.log(`Telegram subscription check: user=${userId} channel=${config.telegram.channelUsername} subscribed=${subscribed}`);
 
     if (!subscribed) {
       await this.api("sendMessage", {
