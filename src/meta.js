@@ -65,15 +65,18 @@ export class MetaClient {
   }
 
   async privateReplyToComment(commentId, config) {
-    const url = this.graphUrl(`/${commentId}/private_replies`);
+    const url = this.graphUrl(`/me/messages`);
     await this.postGraph(url, {
-      message: `${config.instagram.directMessage.text}\n\n${this.telegramBot.getStartUrl(config.telegram.startPayload)}`
-    });
+      recipient: { comment_id: commentId },
+      message: {
+        text: `${config.instagram.directMessage.text}\n\n${this.telegramBot.getStartUrl(config.telegram.startPayload)}`
+      }
+    }, "private reply");
   }
 
   async publicReplyToComment(commentId, message) {
     const url = this.graphUrl(`/${commentId}/replies`);
-    await this.postGraph(url, { message });
+    await this.postGraph(url, { message }, "public comment reply");
   }
 
   async sendDirectMessage(recipientId, config) {
@@ -94,14 +97,14 @@ export class MetaClient {
           }
         }
       }
-    });
+    }, "direct message");
   }
 
   graphUrl(path) {
     return `${this.graphBaseUrl}/${this.apiVersion}${path}`;
   }
 
-  async postGraph(url, payload) {
+  async postGraph(url, payload, label = "Meta API request") {
     if (!this.accessToken) {
       console.warn("META_ACCESS_TOKEN is empty; skipped Meta API call.");
       return;
@@ -114,10 +117,14 @@ export class MetaClient {
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
-      console.error("Meta API error:", JSON.stringify(data));
+      console.error(`${label} failed:`, JSON.stringify({
+        url,
+        status: response.status,
+        response: data
+      }));
       return;
     }
-    console.log("Meta API sent:", JSON.stringify(data));
+    console.log(`${label} sent:`, JSON.stringify(data));
   }
 }
 
