@@ -1,4 +1,5 @@
 import { normalizeUrl } from "./config.js";
+import { recordEvent, upsertTelegramUser } from "./db.js";
 
 const TELEGRAM_API = "https://api.telegram.org/bot";
 
@@ -62,6 +63,12 @@ export class TelegramBot {
       hasCallback: Boolean(update.callback_query),
       callbackData: update.callback_query?.data
     }));
+    await recordEvent("telegram_update_received", {
+      updateId: update.update_id,
+      hasMessage: Boolean(update.message),
+      hasCallback: Boolean(update.callback_query),
+      callbackData: update.callback_query?.data
+    });
 
     if (update.message) return this.handleMessage(update.message);
     if (update.callback_query) return this.handleCallback(update.callback_query);
@@ -72,6 +79,15 @@ export class TelegramBot {
     if (text.startsWith("/start")) {
       const config = await this.configProvider();
       console.log(`Telegram /start from ${message.from?.id}`);
+      await upsertTelegramUser(message.from, {
+        lastStartAt: new Date(),
+        lastChatId: message.chat.id
+      });
+      await recordEvent("telegram_started", {
+        telegramId: message.from?.id,
+        chatId: message.chat.id,
+        text
+      });
       await this.api("sendMessage", {
         chat_id: message.chat.id,
         text: config.telegramTexts.welcome,
@@ -94,6 +110,17 @@ export class TelegramBot {
     const userId = callback.from.id;
     const subscribed = await this.isSubscribed(config.telegram.channelUsername, userId);
     console.log(`Telegram subscription check: user=${userId} channel=${config.telegram.channelUsername} subscribed=${subscribed}`);
+    await upsertTelegramUser(callback.from, {
+      lastSubscriptionCheckAt: new Date(),
+      lastSubscriptionStatus: subscribed,
+      channelUsername: config.telegram.channelUsername
+    });
+    await recordEvent("telegram_subscription_checked", {
+      telegramId: userId,
+      chatId: callback.message.chat.id,
+      channelUsername: config.telegram.channelUsername,
+      subscribed
+    });
 
     if (!subscribed) {
       await this.api("sendMessage", {

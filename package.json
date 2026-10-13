@@ -5,9 +5,12 @@
   "type": "module",
   "scripts": {
     "start": "node src/server.js",
-    "check": "node --check src/server.js && node --check src/config.js && node --check src/meta.js && node --check src/telegram.js && node --check api/webhooks/meta.js && node --check api/webhooks/telegram.js && node --check api/ping.js"
+    "check": "node --check src/server.js && node --check src/config.js && node --check src/db.js && node --check src/meta.js && node --check src/telegram.js && node --check api/webhooks/meta.js && node --check api/webhooks/telegram.js && node --check api/ping.js"
   },
   "engines": {
     "node": ">=20"
+  },
+  "dependencies": {
+    "mongodb": "^7.7.0"
   }
 }

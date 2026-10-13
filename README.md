@@ -52,6 +52,8 @@ Verify token должен совпадать с `META_VERIFY_TOKEN`.
 - `META_ACCESS_TOKEN`
 - `META_API_VERSION`
 - `META_GRAPH_BASE_URL`
+- `MONGODB_URI`
+- `MONGODB_DB`
 
 После деплоя callback для Meta будет:
 
@@ -66,6 +68,10 @@ Telegram на Vercel должен работать через webhook, не че
 Проверить состояние Telegram webhook:
 
 `https://your-vercel-project.vercel.app/telegram/webhook-info?password=YOUR_ADMIN_PASSWORD`
+
+Проверить базовую статистику из MongoDB:
+
+`https://your-vercel-project.vercel.app/stats?password=YOUR_ADMIN_PASSWORD`
 
 ## Telegram
 

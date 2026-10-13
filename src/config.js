@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { getStoredConfig, saveStoredConfig } from "./db.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
@@ -28,6 +29,9 @@ export function loadDotEnv() {
 }
 
 export async function readConfig() {
+  const storedConfig = await getStoredConfig();
+  if (storedConfig) return applyEnvOverrides(storedConfig);
+
   let config;
   try {
     const runtimeContent = await fs.readFile(runtimeConfigPath, "utf8");
@@ -43,6 +47,8 @@ export async function readConfig() {
 }
 
 export async function writeConfig(config) {
+  if (await saveStoredConfig(config)) return;
+
   const content = `${JSON.stringify(config, null, 2)}\n`;
 
   try {

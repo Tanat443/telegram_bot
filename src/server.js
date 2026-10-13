@@ -1,6 +1,7 @@
 import http from "node:http";
 import { URL } from "node:url";
 import { getEnv, loadDotEnv, normalizeUrl, readConfig, requireEnv, writeConfig } from "./config.js";
+import { getStats, hasMongo } from "./db.js";
 import { MetaClient } from "./meta.js";
 import { TelegramBot } from "./telegram.js";
 
@@ -53,6 +54,10 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === "/admin") {
       return handleAdmin(req, res);
+    }
+
+    if (req.method === "GET" && url.pathname === "/stats") {
+      return handleStats(url, res);
     }
 
     if (req.method === "GET" && url.pathname === "/telegram/set-webhook") {
@@ -197,6 +202,22 @@ async function handleAdmin(req, res) {
   }
 
   return sendJson(res, 405, { error: "Method not allowed" });
+}
+
+async function handleStats(url, res) {
+  if (url.searchParams.get("password") !== adminPassword) {
+    return sendJson(res, 401, { error: "Unauthorized" });
+  }
+
+  if (!hasMongo()) {
+    return sendJson(res, 200, {
+      ok: false,
+      error: "MONGODB_URI is not configured"
+    });
+  }
+
+  const stats = await getStats();
+  return sendJson(res, 200, { ok: true, stats });
 }
 
 function verifyMetaWebhook(url, res) {

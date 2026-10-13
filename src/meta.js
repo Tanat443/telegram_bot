@@ -1,3 +1,5 @@
+import { hasInstagramRecipient, markEventOnce, markInstagramRecipientOnce, recordEvent } from "./db.js";
+
 export class MetaClient {
   constructor({ accessToken, apiVersion, graphBaseUrl, configProvider, telegramBot }) {
     this.accessToken = accessToken;
@@ -9,6 +11,7 @@ export class MetaClient {
 
   async handleWebhook(body) {
     console.log("Meta webhook received:", JSON.stringify(summarizeWebhook(body)));
+    await recordEvent("meta_webhook_received", summarizeWebhook(body));
 
     const config = await this.configProvider();
     const entries = Array.isArray(body.entry) ? body.entry : [];
@@ -29,21 +32,52 @@ export class MetaClient {
       const commentId = value.id || value.comment_id;
       const text = value.text || value.message || "";
       const isReply = Boolean(value.parent_id);
+      const actorId = getCommentActorId(value);
       if (!commentId || !this.matchesKeywords(text, config.instagram.keywords)) continue;
       if (isReply) {
         console.log(`Skipped reply comment: ${commentId}`);
+        await recordEvent("instagram_comment_reply_skipped", { commentId });
         continue;
       }
-      if (seenRecently(`comment:${commentId}`)) {
+      if (await seenRecently(`comment:${commentId}`)) {
         console.log(`Skipped duplicate comment event: ${commentId}`);
+        await recordEvent("instagram_comment_duplicate_skipped", { commentId });
         continue;
       }
 
+      const recipientKey = actorId ? `instagram:${actorId}` : "";
+      if (actorId) {
+        const alreadyContacted = await hasInstagramRecipient(recipientKey);
+        if (alreadyContacted === true) {
+          console.log(`Skipped already contacted Instagram commenter: ${actorId}`);
+          await recordEvent("instagram_recipient_duplicate_skipped", {
+            source: "comment",
+            instagramUserId: actorId,
+            commentId
+          });
+          continue;
+        }
+      }
+
       console.log(`Instagram comment trigger: ${commentId} "${text}"`);
+      await recordEvent("instagram_comment_received", {
+        commentId,
+        text,
+        mediaId: value.media?.id || value.media_id || "",
+        fromId: actorId || ""
+      });
       if (config.instagram.publicReplyEnabled === true && config.instagram.publicCommentReply) {
         await this.publicReplyToComment(commentId, config.instagram.publicCommentReply);
       }
-      await this.privateReplyToComment(commentId, config);
+      const sent = await this.privateReplyToComment(commentId, config);
+      if (sent && recipientKey) {
+        await markInstagramRecipientOnce(recipientKey, {
+          source: "comment",
+          instagramUserId: actorId,
+          firstCommentId: commentId,
+          mediaId: value.media?.id || value.media_id || ""
+        });
+      }
     }
   }
 
@@ -62,8 +96,32 @@ export class MetaClient {
       const allowedShare = config.instagram.enabledTriggers.shares && hasShare;
       if (!allowedText && !allowedShare) continue;
 
+      const recipientKey = `instagram:${senderId}`;
+      const alreadyContacted = await hasInstagramRecipient(recipientKey);
+      if (alreadyContacted === true) {
+        console.log(`Skipped already contacted Instagram DM sender: ${senderId}`);
+        await recordEvent("instagram_recipient_duplicate_skipped", {
+          source: "direct_message",
+          instagramUserId: senderId,
+          hasShare
+        });
+        continue;
+      }
+
       console.log(`Instagram DM trigger from ${senderId}`);
-      await this.sendDirectMessage(senderId, config);
+      await recordEvent("instagram_direct_message_received", {
+        senderId,
+        hasShare,
+        text
+      });
+      const sent = await this.sendDirectMessage(senderId, config);
+      if (sent) {
+        await markInstagramRecipientOnce(recipientKey, {
+          source: "direct_message",
+          instagramUserId: senderId,
+          hasShare
+        });
+      }
     }
   }
 
@@ -75,7 +133,7 @@ export class MetaClient {
 
   async privateReplyToComment(commentId, config) {
     const url = this.graphUrl(`/me/messages`);
-    await this.postGraph(url, {
+    return this.postGraph(url, {
       recipient: { comment_id: commentId },
       message: {
         attachment: {
@@ -101,7 +159,7 @@ export class MetaClient {
 
   async sendDirectMessage(recipientId, config) {
     const url = this.graphUrl(`/me/messages`);
-    await this.postGraph(url, {
+    return this.postGraph(url, {
       recipient: { id: recipientId },
       message: {
         attachment: {
@@ -127,7 +185,8 @@ export class MetaClient {
   async postGraph(url, payload, label = "Meta API request") {
     if (!this.accessToken) {
       console.warn("META_ACCESS_TOKEN is empty; skipped Meta API call.");
-      return;
+      await recordEvent("meta_api_skipped", { label, reason: "missing_access_token" });
+      return false;
     }
 
     const response = await fetch(url, {
@@ -142,16 +201,26 @@ export class MetaClient {
         status: response.status,
         response: data
       }));
-      return;
+      await recordEvent("meta_api_failed", {
+        label,
+        status: response.status,
+        response: data
+      });
+      return false;
     }
     console.log(`${label} sent:`, JSON.stringify(data));
+    await recordEvent("meta_api_sent", { label, response: data });
+    return true;
   }
 }
 
 const recentEvents = new Map();
 const RECENT_EVENT_TTL_MS = 10 * 60 * 1000;
 
-function seenRecently(key) {
+async function seenRecently(key) {
+  const stored = await markEventOnce(key, RECENT_EVENT_TTL_MS / 1000);
+  if (stored !== null) return !stored;
+
   const now = Date.now();
   for (const [eventKey, expiresAt] of recentEvents.entries()) {
     if (expiresAt <= now) recentEvents.delete(eventKey);
@@ -178,4 +247,8 @@ function summarizeWebhook(body) {
       messagingCount: Array.isArray(entry.messaging) ? entry.messaging.length : 0
     }))
   };
+}
+
+function getCommentActorId(value) {
+  return value.from?.id || value.user?.id || value.user_id || value.sender_id || "";
 }

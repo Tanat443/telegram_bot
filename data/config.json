@@ -7,8 +7,8 @@
   "instagram": {
     "enabledTriggers": {
       "comments": true,
-      "directMessages": true,
-      "shares": true
+      "directMessages": false,
+      "shares": false
     },
     "keywords": [],
     "publicReplyEnabled": false,
