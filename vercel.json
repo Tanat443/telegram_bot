@@ -1,0 +1,8 @@
+{
+  "rewrites": [
+    {
+      "source": "/webhooks/meta",
+      "destination": "/api/webhooks/meta"
+    }
+  ]
+}

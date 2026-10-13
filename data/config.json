@@ -1,0 +1,28 @@
+{
+  "landingUrl": "https://www.partners.tatti-app.win",
+  "telegram": {
+    "channelUsername": "@test_tanat",
+    "startPayload": "ig"
+  },
+  "instagram": {
+    "enabledTriggers": {
+      "comments": true,
+      "directMessages": true,
+      "shares": true
+    },
+    "keywords": [],
+    "publicCommentReply": "Отправил(а) подробности в Direct.",
+    "directMessage": {
+      "text": "Салем! Нажмите кнопку ниже, чтобы получить доступ. В Telegram бот проверит подписку и откроет ссылку.",
+      "buttonText": "Получить доступ"
+    }
+  },
+  "telegramTexts": {
+    "welcome": "Салем! Сейчас проверю подписку на канал.",
+    "notSubscribed": "Чтобы получить доступ, подпишитесь на канал, затем нажмите кнопку проверки.",
+    "subscribed": "Готово! Вы подписаны. Вот ссылка:",
+    "checkButton": "Проверить подписку",
+    "channelButton": "Подписаться на канал",
+    "landingButton": "Открыть лендинг"
+  }
+}
