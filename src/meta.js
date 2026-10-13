@@ -28,10 +28,19 @@ export class MetaClient {
       const value = change.value || {};
       const commentId = value.id || value.comment_id;
       const text = value.text || value.message || "";
+      const isReply = Boolean(value.parent_id);
       if (!commentId || !this.matchesKeywords(text, config.instagram.keywords)) continue;
+      if (isReply) {
+        console.log(`Skipped reply comment: ${commentId}`);
+        continue;
+      }
+      if (seenRecently(`comment:${commentId}`)) {
+        console.log(`Skipped duplicate comment event: ${commentId}`);
+        continue;
+      }
 
       console.log(`Instagram comment trigger: ${commentId} "${text}"`);
-      if (config.instagram.publicCommentReply) {
+      if (config.instagram.publicReplyEnabled === true && config.instagram.publicCommentReply) {
         await this.publicReplyToComment(commentId, config.instagram.publicCommentReply);
       }
       await this.privateReplyToComment(commentId, config);
@@ -69,7 +78,18 @@ export class MetaClient {
     await this.postGraph(url, {
       recipient: { comment_id: commentId },
       message: {
-        text: `${config.instagram.directMessage.text}\n\n${this.telegramBot.getStartUrl(config.telegram.startPayload)}`
+        attachment: {
+          type: "template",
+          payload: {
+            template_type: "button",
+            text: config.instagram.directMessage.text,
+            buttons: [{
+              type: "web_url",
+              title: config.instagram.directMessage.buttonText,
+              url: this.telegramBot.getStartUrl(config.telegram.startPayload)
+            }]
+          }
+        }
       }
     }, "private reply");
   }
@@ -126,6 +146,19 @@ export class MetaClient {
     }
     console.log(`${label} sent:`, JSON.stringify(data));
   }
+}
+
+const recentEvents = new Map();
+const RECENT_EVENT_TTL_MS = 10 * 60 * 1000;
+
+function seenRecently(key) {
+  const now = Date.now();
+  for (const [eventKey, expiresAt] of recentEvents.entries()) {
+    if (expiresAt <= now) recentEvents.delete(eventKey);
+  }
+  if (recentEvents.has(key)) return true;
+  recentEvents.set(key, now + RECENT_EVENT_TTL_MS);
+  return false;
 }
 
 function summarizeWebhook(body) {

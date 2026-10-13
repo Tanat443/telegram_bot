@@ -111,6 +111,7 @@ async function handleAdmin(req, res) {
     config.instagram.enabledTriggers.directMessages = form.directMessages === "on";
     config.instagram.enabledTriggers.shares = form.shares === "on";
     config.instagram.keywords = splitKeywords(form.keywords);
+    config.instagram.publicReplyEnabled = form.publicReplyEnabled === "on";
     config.instagram.publicCommentReply = form.publicCommentReply;
     config.instagram.directMessage.text = form.directText;
     config.instagram.directMessage.buttonText = form.directButtonText;
@@ -197,6 +198,7 @@ function renderAdmin(config) {
     <label class="check"><input name="comments" type="checkbox" ${checked(config.instagram.enabledTriggers.comments)}> Комментарии</label>
     <label class="check"><input name="directMessages" type="checkbox" ${checked(config.instagram.enabledTriggers.directMessages)}> Сообщения в Direct</label>
     <label class="check"><input name="shares" type="checkbox" ${checked(config.instagram.enabledTriggers.shares)}> Share/repost в Direct</label>
+    <label class="check"><input name="publicReplyEnabled" type="checkbox" ${checked(config.instagram.publicReplyEnabled === true)}> Публично отвечать под комментарием</label>
 
     <label>Публичный ответ на комментарий</label>
     <input name="publicCommentReply" type="text" value="${esc(config.instagram.publicCommentReply)}">

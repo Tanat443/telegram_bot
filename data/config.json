@@ -11,6 +11,7 @@
       "shares": true
     },
     "keywords": [],
+    "publicReplyEnabled": false,
     "publicCommentReply": "Отправил(а) подробности в Direct.",
     "directMessage": {
       "text": "Салем! Нажмите кнопку ниже, чтобы получить доступ. В Telegram бот проверит подписку и откроет ссылку.",
