@@ -220,7 +220,7 @@ export class TelegramBot {
       ]]
     };
     const text = `${config.telegramTexts.subscribed}\n${normalizeUrl(config.landingUrl)}`;
-    const imageId = config.telegramMedia?.subscribedPhotoId;
+    const imageId = config.telegramMedia?.subscribedPhotoId || "";
     console.log(`Telegram subscribed response: subscribedPhotoId=${imageId || "empty"}`);
     await recordEvent("telegram_subscribed_response_started", {
       chatId,

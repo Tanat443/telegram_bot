@@ -14,6 +14,7 @@ const verifyToken = getEnv("META_VERIFY_TOKEN", "verify-token");
 const telegramWebhookSecret = getEnv("TELEGRAM_WEBHOOK_SECRET");
 const telegramToken = getEnv("TELEGRAM_BOT_TOKEN");
 const MAX_IMAGE_UPLOAD_BYTES = 1.5 * 1024 * 1024;
+const MAX_ADMIN_UPLOAD_FIELDS = 10;
 
 const telegram = new TelegramBot({
   token: telegramToken,
@@ -1166,11 +1167,12 @@ async function readFormData(req) {
   return new Promise((resolve, reject) => {
     const fields = {};
     const files = {};
+    const errors = [];
     const busboy = Busboy({
       headers: req.headers,
       limits: {
         fileSize: MAX_IMAGE_UPLOAD_BYTES,
-        files: 4,
+        files: MAX_ADMIN_UPLOAD_FIELDS,
         fields: 80
       }
     });
@@ -1182,6 +1184,13 @@ async function readFormData(req) {
     busboy.on("file", (name, file, info) => {
       const chunks = [];
       let tooLarge = false;
+      const filename = info.filename || "";
+
+      if (!filename) {
+        file.resume();
+        return;
+      }
+
       file.on("data", (chunk) => {
         if (!tooLarge) chunks.push(chunk);
       });
@@ -1199,19 +1208,32 @@ async function readFormData(req) {
         if (buffer.length > 0) {
           files[name] = {
             buffer,
-            filename: info.filename,
+            filename,
             contentType: info.mimeType
           };
+          return;
         }
+
+        errors.push(`Файл "${filename}" пустой или не был передан браузером.`);
       });
     });
 
+    busboy.on("filesLimit", () => {
+      errors.push("Слишком много файлов в форме. Обновите страницу и попробуйте загрузить только нужные файлы.");
+    });
     busboy.on("error", reject);
     busboy.on("finish", () => {
-      const errors = Object.values(files).some((file) => file.tooLarge)
+      if (Object.keys(files).length > 0) {
+        console.log(
+          `Admin upload files: ${Object.entries(files)
+            .map(([name, file]) => `${name}:${file.filename || "unknown"}:${file.contentType || "unknown"}:${file.buffer?.length || 0}`)
+            .join(", ")}`
+        );
+      }
+      const sizeErrors = Object.values(files).some((file) => file.tooLarge)
         ? ["Картинка слишком большая. Максимум 1.5 MB."]
         : [];
-      resolve({ fields, files, errors });
+      resolve({ fields, files, errors: [...errors, ...sizeErrors] });
     });
     req.pipe(busboy);
   });
