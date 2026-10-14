@@ -97,25 +97,61 @@ Why this is better later:
 
 ### campaigns
 
-Future campaign model for specific posts/Reels/keywords.
+Campaign model for specific posts/Reels/keywords. If this collection is empty, the app builds a backwards-compatible `default` campaign from `config.value`.
 
 ```json
 {
-  "_id": "default",
-  "name": "Default campaign",
+  "_id": "reels_oct_14",
+  "name": "Reels Oct 14",
   "instagramAccountId": "17841400079763059",
-  "mediaIds": [],
-  "keywords": [],
-  "templateIds": {
-    "instagramPrivateReply": "instagram.direct.initial",
-    "telegramWelcome": "telegram.start.welcome"
+  "mediaIds": ["180..."],
+  "keywords": ["хочу", "курс"],
+  "instagram": {
+    "enabledTriggers": {
+      "comments": true,
+      "directMessages": false,
+      "shares": false
+    },
+    "publicReplyEnabled": false,
+    "publicCommentReply": "Отправил(а) подробности в Direct.",
+    "directMessage": {
+      "text": "Салем! Нажмите кнопку ниже, чтобы получить доступ.",
+      "buttonText": "Получить доступ"
+    },
+    "directMedia": {
+      "imageId": ""
+    }
+  },
+  "telegram": {
+    "channelUsername": "@test_tanat",
+    "startPayload": "camp_reels_oct_14"
+  },
+  "telegramTexts": {
+    "welcome": "Салем! Сейчас проверю подписку на канал.",
+    "notSubscribed": "Чтобы получить доступ, подпишитесь на канал, затем нажмите кнопку проверки.",
+    "subscribed": "Готово! Вы подписаны. Вот ссылка:"
+  },
+  "telegramMedia": {
+    "welcomePhoto1Id": "",
+    "welcomeCircleVideoId": "",
+    "welcomePhoto2Id": "",
+    "subscribedPhotoId": ""
   },
   "landingUrl": "https://www.partners.tatti-app.win",
   "status": "active",
+  "priority": 0,
   "createdAt": "...",
   "updatedAt": "..."
 }
 ```
+
+Runtime behavior:
+
+- comment webhooks choose the first active campaign whose `mediaIds` contains the Instagram post/Reels media ID and whose `keywords` match the comment text;
+- empty `mediaIds` means the campaign can match any post;
+- empty `keywords` means every comment text matches;
+- Direct/share events choose the first active campaign whose Direct/share trigger and keywords match;
+- Instagram replies use one global Telegram bot, but campaign-specific `telegram.startPayload` routes the user into the right Telegram flow.
 
 ### events
 
@@ -134,12 +170,14 @@ instagram_recipient_duplicate_skipped
 
 ### instagram_recipients
 
-Permanent deduplication: one Instagram user receives the automation only once unless an admin resets the record or campaign-scoped rules are added.
+Campaign-scoped deduplication: one Instagram user receives the same campaign once, but can still receive a different campaign.
 
 ```json
 {
-  "_id": "instagram:123456789",
+  "_id": "instagram:123456789:campaign:reels_oct_14",
   "instagramUserId": "123456789",
+  "campaignId": "reels_oct_14",
+  "campaignName": "Reels Oct 14",
   "source": "comment",
   "firstCommentId": "178...",
   "mediaId": "180...",
@@ -156,6 +194,9 @@ Telegram-side users and subscription checks.
   "_id": "123456789",
   "telegramId": 123456789,
   "username": "user",
+  "activeCampaignId": "reels_oct_14",
+  "activeCampaignName": "Reels Oct 14",
+  "activeStartPayload": "camp_reels_oct_14",
   "lastSubscriptionStatus": true,
   "channelUsername": "@test_tanat",
   "createdAt": "...",

@@ -47,6 +47,91 @@ export async function saveStoredConfig(config) {
   return true;
 }
 
+export async function getActiveCampaigns() {
+  const db = await getDb();
+  if (!db) return [];
+
+  await ensureIndexes(db);
+  return db.collection("campaigns")
+    .find({ status: "active" })
+    .sort({ priority: -1, updatedAt: -1, createdAt: -1 })
+    .toArray();
+}
+
+export async function getCampaignById(id) {
+  const db = await getDb();
+  if (!db || !id) return null;
+
+  await ensureIndexes(db);
+  return db.collection("campaigns").findOne({ _id: String(id), status: "active" });
+}
+
+export async function getCampaignByStartPayload(payload) {
+  const db = await getDb();
+  if (!db || !payload) return null;
+
+  await ensureIndexes(db);
+  return db.collection("campaigns").findOne({
+    status: "active",
+    "telegram.startPayload": String(payload)
+  });
+}
+
+export async function upsertInstagramMedia(items = []) {
+  const db = await getDb();
+  if (!db || !items.length) return 0;
+
+  await ensureIndexes(db);
+  const now = new Date();
+  const operations = items
+    .filter((item) => item?.id)
+    .map((item) => ({
+      updateOne: {
+        filter: { _id: String(item.id) },
+        update: {
+          $set: {
+            instagramAccountId: item.instagramAccountId || "me",
+            caption: item.caption || "",
+            mediaType: item.media_type || item.mediaType || "",
+            mediaUrl: item.media_url || item.mediaUrl || "",
+            thumbnailUrl: item.thumbnail_url || item.thumbnailUrl || "",
+            permalink: item.permalink || "",
+            timestamp: item.timestamp || "",
+            syncedAt: now
+          },
+          $setOnInsert: {
+            createdAt: now
+          }
+        },
+        upsert: true
+      }
+    }));
+
+  if (!operations.length) return 0;
+  const result = await db.collection("instagram_media").bulkWrite(operations);
+  return result.upsertedCount + result.modifiedCount;
+}
+
+export async function listInstagramMedia(limit = 80) {
+  const db = await getDb();
+  if (!db) return [];
+
+  await ensureIndexes(db);
+  const items = await db.collection("instagram_media")
+    .find({})
+    .sort({ timestamp: -1, syncedAt: -1 })
+    .limit(limit)
+    .toArray();
+
+  return items.map((item) => ({
+    ...item,
+    id: String(item._id),
+    _id: String(item._id),
+    syncedAt: item.syncedAt?.toISOString?.() || item.syncedAt,
+    createdAt: item.createdAt?.toISOString?.() || item.createdAt
+  }));
+}
+
 export async function recordEvent(type, payload = {}) {
   const db = await getDb();
   if (!db) return;
@@ -132,6 +217,13 @@ export async function upsertTelegramUser(user, extra = {}) {
   );
 }
 
+export async function getTelegramUser(userId) {
+  const db = await getDb();
+  if (!db || !userId) return null;
+
+  return db.collection("telegram_users").findOne({ _id: String(userId) });
+}
+
 export async function getStats() {
   const db = await getDb();
   if (!db) return null;
@@ -148,7 +240,7 @@ export async function getStats() {
       { $sort: { count: -1 } }
     ]).toArray(),
     db.collection("events")
-      .find({}, { projection: { type: 1, createdAt: 1, label: 1, status: 1, subscribed: 1, commentId: 1, telegramId: 1, instagramUserId: 1 } })
+      .find({}, { projection: { type: 1, createdAt: 1, label: 1, status: 1, subscribed: 1, commentId: 1, telegramId: 1, instagramUserId: 1, campaignId: 1, campaignName: 1 } })
       .sort({ createdAt: -1 })
       .limit(12)
       .toArray()
@@ -192,6 +284,27 @@ export async function saveMediaFile({ buffer, filename, contentType, metadata = 
   });
 }
 
+export async function listMediaFiles(limit = 60) {
+  const db = await getDb();
+  if (!db) return [];
+
+  await ensureIndexes(db);
+  const files = await db.collection("media.files")
+    .find({})
+    .sort({ uploadDate: -1 })
+    .limit(limit)
+    .toArray();
+
+  return files.map((file) => ({
+    id: String(file._id),
+    filename: file.filename || "media",
+    contentType: file.contentType || file.metadata?.contentType || "",
+    length: file.length || 0,
+    uploadDate: file.uploadDate,
+    metadata: file.metadata || {}
+  }));
+}
+
 export async function getMediaFile(id) {
   const db = await getDb();
   const objectId = toObjectId(id);
@@ -219,6 +332,13 @@ async function ensureIndexes(db) {
   await Promise.all([
     db.collection("processed_events").createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
     db.collection("instagram_recipients").createIndex({ createdAt: -1 }),
+    db.collection("instagram_recipients").createIndex({ campaignId: 1, instagramUserId: 1 }),
+    db.collection("campaigns").createIndex({ status: 1, priority: -1, updatedAt: -1 }),
+    db.collection("campaigns").createIndex({ status: 1, "telegram.startPayload": 1 }),
+    db.collection("campaigns").createIndex({ status: 1, mediaIds: 1 }),
+    db.collection("instagram_media").createIndex({ timestamp: -1, syncedAt: -1 }),
+    db.collection("instagram_media").createIndex({ mediaType: 1 }),
+    db.collection("media.files").createIndex({ uploadDate: -1 }),
     db.collection("events").createIndex({ createdAt: -1 }),
     db.collection("events").createIndex({ type: 1, createdAt: -1 }),
     db.collection("telegram_users").createIndex({ updatedAt: -1 })

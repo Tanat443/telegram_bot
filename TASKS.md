@@ -245,6 +245,56 @@
   - только `image/*`;
   - максимум 4 MB.
 
+### 16. Добавили основу campaigns и campaign-scoped deduplication
+
+- Добавили MongoDB helpers для коллекции:
+  - `campaigns`.
+- Добавили чтение активных кампаний с fallback на старый single-config:
+  - если кампаний нет, код создает runtime `default` campaign из текущих настроек.
+- Добавили выбор campaign для Instagram comments:
+  - по `mediaId` поста/Reels;
+  - по keywords;
+  - пустой `mediaIds` работает как catch-all.
+- Добавили выбор campaign для Instagram Direct/share:
+  - по включенным trigger flags;
+  - по keywords для Direct.
+- Перевели deduplication Instagram recipients с глобального ключа на campaign-scoped ключ:
+  - `instagram:{userId}:campaign:{campaignId}`.
+- Добавили campaign context в события:
+  - `campaignId`;
+  - `campaignName`.
+- Telegram оставили одним глобальным ботом:
+  - campaign выбирается через `telegram.startPayload`;
+  - `/start camp_...` сохраняет active campaign у Telegram user;
+  - callback `check_subscription` использует сохраненную campaign для проверки канала и выдачи landing URL.
+- Обновили `docs/DB_ARCHITECTURE.md` с фактической схемой `campaigns`.
+
+### 17. Добавили отдельный UI для автоматизаций
+
+- Добавили страницу:
+  - `/admin/campaigns` — список автоматизаций.
+- Добавили страницу:
+  - `/admin/campaigns/new` — создание автоматизации.
+- Добавили страницу:
+  - `/admin/campaigns/:id` — редактирование автоматизации.
+- В интерфейсе используем термин "Автоматизации", а в коде сохраняем техническую модель `campaigns`.
+- Автоматизации сохраняются в `config.campaigns`, чтобы UI работал сразу без отдельной миграции коллекции.
+- Добавили поля для:
+  - status;
+  - priority;
+  - media IDs;
+  - keywords;
+  - triggers;
+  - Instagram Direct text/button/image media ID;
+  - Telegram channel;
+  - Telegram start payload;
+  - Telegram texts;
+  - Telegram media IDs;
+  - campaign landing URL.
+- Зарезервировали страницы:
+  - `/admin/posts` — будущий список Instagram постов/Reels;
+  - `/admin/media` — будущая media library.
+
 ## Текущие важные env-переменные
 
 - `TELEGRAM_BOT_TOKEN`
@@ -292,11 +342,10 @@
 
 ### Campaigns
 
-- Add campaign collection.
-- Support campaign per specific post/Reels.
-- Support media IDs allowlist.
-- Support keyword sets per campaign.
-- Support per-campaign landing URL.
+- Add campaign delete/archive action.
+- Support campaign per specific post/Reels from synced Instagram posts.
+- Support media IDs allowlist via picker instead of manual IDs.
+- Add campaign-specific upload controls instead of manual media IDs.
 
 ### Better authentication
 

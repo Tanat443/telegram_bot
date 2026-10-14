@@ -2,7 +2,7 @@ import http from "node:http";
 import Busboy from "busboy";
 import { URL } from "node:url";
 import { getEnv, loadDotEnv, normalizeUrl, readConfig, writeConfig } from "./config.js";
-import { getMediaFile, getStats, hasMongo, saveMediaFile } from "./db.js";
+import { getMediaFile, getStats, hasMongo, listInstagramMedia, listMediaFiles, saveMediaFile, upsertInstagramMedia } from "./db.js";
 import { MetaClient } from "./meta.js";
 import { TelegramBot } from "./telegram.js";
 
@@ -81,6 +81,26 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === "/admin") {
       return handleAdmin(req, res);
+    }
+
+    if (url.pathname === "/admin/campaigns") {
+      return handleCampaignList(req, res);
+    }
+
+    if (url.pathname === "/admin/campaigns/new") {
+      return handleCampaignEditor(req, res, null);
+    }
+
+    if (url.pathname.startsWith("/admin/campaigns/")) {
+      return handleCampaignEditor(req, res, decodeURIComponent(url.pathname.replace("/admin/campaigns/", "")));
+    }
+
+    if (url.pathname === "/admin/posts") {
+      return handleAdminPosts(req, res);
+    }
+
+    if (url.pathname === "/admin/media") {
+      return handleAdminMedia(req, res);
     }
 
     if (req.method === "GET" && url.pathname === "/admin/media-debug") {
@@ -276,6 +296,102 @@ async function handleAdmin(req, res) {
   }
 
   return sendJson(res, 405, { error: "Method not allowed" });
+}
+
+async function handleCampaignList(req, res) {
+  if (req.method !== "GET") return sendJson(res, 405, { error: "Method not allowed" });
+
+  const config = await readConfig();
+  return sendHtml(res, renderCampaignList(config));
+}
+
+async function handleCampaignEditor(req, res, campaignId) {
+  const config = await readConfig();
+  const campaigns = adminCampaigns(config);
+  const campaign = campaignId ? campaigns.find((item) => String(item._id || item.id) === campaignId) : null;
+
+  if (req.method === "GET") {
+    if (campaignId && !campaign) {
+      return sendHtml(res, renderMessage("Автоматизация не найдена", "/admin/campaigns"), 404);
+    }
+    const posts = hasMongo() ? await listInstagramMedia() : [];
+    const mediaFiles = hasMongo() ? await listMediaFiles() : [];
+    return sendHtml(res, renderCampaignEditor(config, campaign || defaultAdminCampaign(config), Boolean(campaignId), posts, mediaFiles));
+  }
+
+  if (req.method !== "POST") return sendJson(res, 405, { error: "Method not allowed" });
+
+  const form = await readForm(req);
+  if (form.password !== adminPassword) {
+    return sendHtml(res, renderMessage("Неверный пароль", campaignId ? `/admin/campaigns/${encodeURIComponent(campaignId)}` : "/admin/campaigns/new"), 401);
+  }
+
+  const nextCampaign = normalizeCampaignForm(form, config, campaigns.length);
+  const nextCampaigns = campaigns.filter((item) => String(item._id || item.id) !== nextCampaign._id);
+  nextCampaigns.push(nextCampaign);
+  config.campaigns = nextCampaigns.sort((a, b) => Number(b.priority || 0) - Number(a.priority || 0));
+
+  await writeConfig(config);
+  return sendHtml(res, renderMessage("Автоматизация сохранена", `/admin/campaigns/${encodeURIComponent(nextCampaign._id)}`));
+}
+
+async function handleAdminMedia(req, res) {
+  const config = await readConfig();
+
+  if (req.method === "GET") {
+    const files = hasMongo() ? await listMediaFiles() : [];
+    return sendHtml(res, renderMediaLibrary(config, files, hasMongo()));
+  }
+
+  if (req.method !== "POST") return sendJson(res, 405, { error: "Method not allowed" });
+
+  const { fields: form, files, errors } = await readFormData(req);
+  if (errors.length) {
+    return sendHtml(res, renderMessage(errors.join("<br>"), "/admin/media"), 400);
+  }
+  if (form.password !== adminPassword) {
+    return sendHtml(res, renderMessage("Неверный пароль", "/admin/media"), 401);
+  }
+
+  try {
+    const file = files.mediaFile;
+    if (!file?.buffer?.length) {
+      return sendHtml(res, renderMessage("Выберите файл для загрузки", "/admin/media"), 400);
+    }
+    const expectedPrefix = file.contentType?.startsWith("video/") ? "video/" : "image/";
+    await saveUploadedMedia(file, form.purpose || "media_library", expectedPrefix);
+  } catch (error) {
+    return sendHtml(res, renderMessage(error.message, "/admin/media"), 400);
+  }
+
+  return sendHtml(res, renderMessage("Файл загружен", "/admin/media"));
+}
+
+async function handleAdminPosts(req, res) {
+  const config = await readConfig();
+
+  if (req.method === "GET") {
+    const posts = hasMongo() ? await listInstagramMedia() : [];
+    return sendHtml(res, renderInstagramPosts(config, posts, hasMongo()));
+  }
+
+  if (req.method !== "POST") return sendJson(res, 405, { error: "Method not allowed" });
+
+  const form = await readForm(req);
+  if (form.password !== adminPassword) {
+    return sendHtml(res, renderMessage("Неверный пароль", "/admin/posts"), 401);
+  }
+  if (!hasMongo()) {
+    return sendHtml(res, renderMessage("MONGODB_URI не настроен", "/admin/posts"), 400);
+  }
+
+  try {
+    const items = await meta.fetchMediaList(50);
+    const saved = await upsertInstagramMedia(items);
+    return sendHtml(res, renderMessage(`Посты синхронизированы: ${saved}`, "/admin/posts"));
+  } catch (error) {
+    return sendHtml(res, renderMessage(error.message, "/admin/posts"), 400);
+  }
 }
 
 async function saveUploadedMedia(file, purpose, expectedPrefix) {
@@ -641,6 +757,13 @@ function formatDate(value) {
   });
 }
 
+function formatBytes(value) {
+  const bytes = Number(value || 0);
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
 function mediaPreview(url, alt) {
   return `<img src="${esc(url)}" alt="${esc(alt)}" style="width:100%;max-height:180px;object-fit:cover;border-radius:8px;border:1px solid rgba(255,255,255,.7)">`;
 }
@@ -651,6 +774,765 @@ function videoPreview(url) {
 
 function mediaAdminUrl(mediaId) {
   return `/media/${encodeURIComponent(mediaId)}?v=${encodeURIComponent(mediaId)}`;
+}
+
+function parseCampaignsForm(value, config) {
+  if (!String(value || "").trim()) return Array.isArray(config.campaigns) ? config.campaigns : [];
+
+  let parsed;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error("Не удалось прочитать автоматизации. Обновите страницу и попробуйте снова.");
+  }
+
+  if (!Array.isArray(parsed)) return [];
+
+  return parsed
+    .map((campaign, index) => normalizeAdminCampaign(campaign, config, index))
+    .filter(Boolean);
+}
+
+function normalizeCampaignForm(form, config, index = 0) {
+  return normalizeAdminCampaign({
+    _id: form.id,
+    name: form.name,
+    status: form.status,
+    priority: form.priority,
+    mediaIds: form.mediaIds,
+    keywords: form.keywords,
+    landingUrl: form.landingUrl,
+    instagram: {
+      enabledTriggers: {
+        comments: form.comments === "on",
+        directMessages: form.directMessages === "on",
+        shares: form.shares === "on"
+      },
+      publicReplyEnabled: form.publicReplyEnabled === "on",
+      publicCommentReply: form.publicCommentReply,
+      directMessage: {
+        text: form.directText,
+        buttonText: form.directButtonText
+      },
+      directMedia: {
+        imageId: form.directImageId
+      }
+    },
+    telegram: {
+      channelUsername: form.channelUsername,
+      startPayload: form.startPayload
+    },
+    telegramTexts: {
+      welcome: form.tgWelcome,
+      notSubscribed: form.tgNotSubscribed,
+      subscribed: form.tgSubscribed
+    },
+    telegramMedia: {
+      welcomePhoto1Id: form.welcomePhoto1Id,
+      welcomeCircleVideoId: form.welcomeCircleVideoId,
+      welcomePhoto2Id: form.welcomePhoto2Id,
+      subscribedPhotoId: form.subscribedPhotoId
+    }
+  }, config, index);
+}
+
+function normalizeAdminCampaign(campaign, config, index) {
+  const name = String(campaign?.name || "").trim();
+  const id = slugify(campaign?._id || campaign?.id || name || `automation-${index + 1}`);
+  if (!id && !name) return null;
+
+  const telegram = campaign?.telegram || {};
+  const instagram = campaign?.instagram || {};
+  const directMessage = instagram.directMessage || {};
+
+  return {
+    _id: id,
+    name: name || id,
+    status: campaign?.status === "paused" ? "paused" : "active",
+    priority: Number(campaign?.priority || 0),
+    mediaIds: splitLines(campaign?.mediaIds),
+    keywords: splitKeywords(Array.isArray(campaign?.keywords) ? campaign.keywords.join(",") : campaign?.keywords),
+    landingUrl: normalizeUrl(campaign?.landingUrl || config.landingUrl),
+    instagram: {
+      enabledTriggers: {
+        comments: Boolean(instagram.enabledTriggers?.comments),
+        directMessages: Boolean(instagram.enabledTriggers?.directMessages),
+        shares: Boolean(instagram.enabledTriggers?.shares)
+      },
+      publicReplyEnabled: Boolean(instagram.publicReplyEnabled),
+      publicCommentReply: String(instagram.publicCommentReply || config.instagram?.publicCommentReply || ""),
+      directMessage: {
+        text: String(directMessage.text || config.instagram?.directMessage?.text || ""),
+        buttonText: String(directMessage.buttonText || config.instagram?.directMessage?.buttonText || "")
+      },
+      directMedia: {
+        imageId: String(instagram.directMedia?.imageId || "")
+      }
+    },
+    telegram: {
+      channelUsername: String(telegram.channelUsername || config.telegram?.channelUsername || ""),
+      startPayload: slugify(telegram.startPayload || `camp-${id}`).replaceAll("-", "_")
+    },
+    telegramTexts: {
+      welcome: String(campaign?.telegramTexts?.welcome || config.telegramTexts?.welcome || ""),
+      notSubscribed: String(campaign?.telegramTexts?.notSubscribed || config.telegramTexts?.notSubscribed || ""),
+      subscribed: String(campaign?.telegramTexts?.subscribed || config.telegramTexts?.subscribed || "")
+    },
+    telegramMedia: {
+      welcomePhoto1Id: String(campaign?.telegramMedia?.welcomePhoto1Id || ""),
+      welcomeCircleVideoId: String(campaign?.telegramMedia?.welcomeCircleVideoId || ""),
+      welcomePhoto2Id: String(campaign?.telegramMedia?.welcomePhoto2Id || ""),
+      subscribedPhotoId: String(campaign?.telegramMedia?.subscribedPhotoId || "")
+    },
+    updatedAt: new Date().toISOString()
+  };
+}
+
+function defaultAdminCampaign(config) {
+  return normalizeAdminCampaign({
+    _id: "",
+    name: "",
+    status: "active",
+    priority: 0,
+    mediaIds: [],
+    keywords: config.instagram?.keywords || [],
+    landingUrl: config.landingUrl,
+    instagram: config.instagram || {},
+    telegram: {
+      channelUsername: config.telegram?.channelUsername || "",
+      startPayload: ""
+    },
+    telegramTexts: config.telegramTexts || {},
+    telegramMedia: {}
+  }, config, adminCampaigns(config).length);
+}
+
+function adminCampaigns(config) {
+  return Array.isArray(config.campaigns) ? config.campaigns : [];
+}
+
+function splitLines(value) {
+  if (Array.isArray(value)) return value.map((item) => String(item || "").trim()).filter(Boolean);
+  return String(value || "")
+    .split(/[\n,]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function slugify(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 72);
+}
+
+function scriptJson(value) {
+  return JSON.stringify(value).replaceAll("<", "\\u003c");
+}
+
+function renderAdminShell(title, config, content) {
+  return `<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${esc(title)} | Instagram Telegram Gate</title>
+  <style>
+    :root {
+      --ink: #10202f;
+      --muted: #657487;
+      --line: rgba(255,255,255,.62);
+      --glass: rgba(255,255,255,.62);
+      --glass-strong: rgba(255,255,255,.78);
+      --blue: #1d5fd6;
+      --teal: #0f9f94;
+      --coral: #d96b4b;
+      --shadow: 0 22px 70px rgba(28, 48, 82, .18);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+      color: var(--ink);
+      background: linear-gradient(135deg, #eaf7f4 0%, #eef4ff 42%, #fff3ec 100%);
+    }
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background:
+        linear-gradient(90deg, rgba(255,255,255,.48), rgba(255,255,255,0) 38%, rgba(255,255,255,.36)),
+        repeating-linear-gradient(0deg, rgba(255,255,255,.13), rgba(255,255,255,.13) 1px, transparent 1px, transparent 18px);
+    }
+    main { width: min(1160px, calc(100% - 32px)); margin: 0 auto; padding: 30px 0 46px; position: relative; }
+    .topbar { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; margin-bottom: 18px; }
+    h1 { margin: 0; font-size: clamp(26px, 4vw, 42px); line-height: 1.04; letter-spacing: 0; }
+    h2 { margin: 0 0 16px; font-size: 16px; letter-spacing: 0; }
+    .subtitle { margin: 8px 0 0; color: var(--muted); max-width: 680px; }
+    .nav { display: flex; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+    .nav a, .button, button {
+      border: 1px solid rgba(255,255,255,.68);
+      border-radius: 8px;
+      background: rgba(255,255,255,.55);
+      color: var(--ink);
+      box-shadow: 0 8px 24px rgba(28,48,82,.08);
+      text-decoration: none;
+      padding: 10px 14px;
+      font: inherit;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 42px;
+    }
+    .button.primary, button.primary { background: linear-gradient(135deg, var(--blue), var(--teal)); color: white; font-weight: 800; }
+    .panel, .card {
+      border: 1px solid rgba(255,255,255,.72);
+      border-radius: 8px;
+      background: var(--glass);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(22px) saturate(150%);
+      -webkit-backdrop-filter: blur(22px) saturate(150%);
+    }
+    .panel { padding: 22px; }
+    .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+    .stack { display: grid; gap: 14px; }
+    .card { padding: 18px; }
+    .card-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
+    .muted, small { color: var(--muted); }
+    .pill { border-radius: 8px; padding: 6px 9px; font-size: 12px; font-weight: 800; background: rgba(255,255,255,.58); border: 1px solid var(--line); }
+    .pill.active { color: #08645d; }
+    .pill.paused { color: #93431f; }
+    .meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+    form { display: grid; gap: 14px; }
+    .section { padding: 22px; border: 1px solid rgba(255,255,255,.72); border-radius: 8px; background: var(--glass); box-shadow: var(--shadow); }
+    .row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+    .field { min-width: 0; }
+    label { display: block; font-weight: 800; font-size: 13px; margin: 0 0 7px; }
+    input[type="text"], input[type="password"], input[type="number"], textarea, select {
+      width: 100%;
+      border: 1px solid rgba(42, 74, 104, .18);
+      border-radius: 8px;
+      background: rgba(255,255,255,.7);
+      color: var(--ink);
+      padding: 11px 12px;
+      font: inherit;
+      outline: none;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.8);
+    }
+    input:focus, textarea:focus, select:focus { border-color: rgba(29,95,214,.55); box-shadow: 0 0 0 3px rgba(29,95,214,.13); }
+    textarea { min-height: 104px; resize: vertical; }
+    .toggles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+    .toggle { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px; border-radius: 8px; border: 1px solid rgba(255,255,255,.64); background: rgba(255,255,255,.45); font-weight: 800; }
+    .toggle input { inline-size: 42px; block-size: 23px; accent-color: var(--teal); }
+    .post-picker { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+    .post-option { display: grid; grid-template-columns: auto 64px minmax(0, 1fr); align-items: center; gap: 10px; min-height: 82px; padding: 10px; border-radius: 8px; border: 1px solid rgba(255,255,255,.64); background: rgba(255,255,255,.45); margin: 0; }
+    .post-option input { accent-color: var(--teal); }
+    .post-thumb { width: 64px; height: 64px; border-radius: 8px; object-fit: cover; border: 1px solid rgba(255,255,255,.72); background: rgba(255,255,255,.5); display: grid; place-items: center; color: var(--muted); font-size: 11px; text-align: center; }
+    .post-option strong, .post-option small { display: block; overflow-wrap: anywhere; }
+    .actions { display: flex; justify-content: space-between; gap: 14px; align-items: center; }
+    @media (max-width: 900px) {
+      main { width: min(100% - 20px, 1160px); padding-top: 16px; }
+      .topbar { display: block; }
+      .nav { justify-content: flex-start; margin-top: 14px; }
+      .grid, .row, .toggles, .post-picker { grid-template-columns: 1fr; }
+      .actions { display: grid; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <div class="topbar">
+    <div>
+      <h1>${esc(title)}</h1>
+      <p class="subtitle">Автоматизации используют один Telegram bot, а нужный сценарий выбирается через start payload.</p>
+    </div>
+    <nav class="nav">
+      <a href="/admin">Settings</a>
+      <a href="/admin/campaigns">Автоматизации</a>
+      <a href="/admin/posts">Posts</a>
+      <a href="/admin/media">Media</a>
+      <a href="/stats">Stats</a>
+    </nav>
+  </div>
+  ${content}
+</main>
+</body>
+</html>`;
+}
+
+function renderCampaignList(config) {
+  const campaigns = adminCampaigns(config);
+  const content = `
+    <div class="actions" style="margin-bottom:14px">
+      <div class="muted">${campaigns.length ? `Создано автоматизаций: ${campaigns.length}` : "Пока нет отдельных автоматизаций. Работает default-сценарий из Settings."}</div>
+      <a class="button primary" href="/admin/campaigns/new">Создать автоматизацию</a>
+    </div>
+    <section class="grid">
+      ${campaigns.length ? campaigns.map(renderCampaignCard).join("") : renderEmptyCampaignCard()}
+    </section>`;
+  return renderAdminShell("Автоматизации", config, content);
+}
+
+function renderCampaignCard(campaign) {
+  const triggers = campaign.instagram?.enabledTriggers || {};
+  const mediaCount = Array.isArray(campaign.mediaIds) ? campaign.mediaIds.length : 0;
+  const keywordCount = Array.isArray(campaign.keywords) ? campaign.keywords.length : 0;
+  const status = campaign.status === "paused" ? "paused" : "active";
+  return `
+    <article class="card">
+      <div class="card-head">
+        <div>
+          <h2>${esc(campaign.name || campaign._id)}</h2>
+          <div class="muted">${esc(campaign._id || "")}</div>
+        </div>
+        <span class="pill ${status}">${status === "active" ? "Active" : "Paused"}</span>
+      </div>
+      <div class="meta">
+        <span class="pill">${mediaCount ? `${mediaCount} post/Reels` : "Any post"}</span>
+        <span class="pill">${keywordCount ? `${keywordCount} keywords` : "Any keyword"}</span>
+        ${triggers.comments ? `<span class="pill">Comments</span>` : ""}
+        ${triggers.directMessages ? `<span class="pill">Direct</span>` : ""}
+        ${triggers.shares ? `<span class="pill">Share</span>` : ""}
+      </div>
+      <p class="muted">Payload: <strong>${esc(campaign.telegram?.startPayload || "")}</strong></p>
+      <a class="button" href="/admin/campaigns/${encodeURIComponent(campaign._id || campaign.id)}">Редактировать</a>
+    </article>`;
+}
+
+function renderEmptyCampaignCard() {
+  return `
+    <article class="card">
+      <h2>Default-сценарий активен</h2>
+      <p class="muted">Сейчас Instagram webhook использует глобальные настройки из Settings. Создай автоматизацию, чтобы привязать отдельные посты/Reels, keywords, Telegram payload и landing URL.</p>
+      <a class="button primary" href="/admin/campaigns/new">Создать первую</a>
+    </article>`;
+}
+
+function renderCampaignEditor(config, campaign, existing, posts = [], mediaFiles = []) {
+  const triggers = campaign.instagram?.enabledTriggers || {};
+  const directMessage = campaign.instagram?.directMessage || {};
+  const selectedMediaIds = new Set((campaign.mediaIds || []).map(String));
+  const content = `
+    <form id="campaignForm" method="post" action="${existing ? `/admin/campaigns/${encodeURIComponent(campaign._id)}` : "/admin/campaigns/new"}">
+      <section class="section">
+        <h2>Доступ</h2>
+        <div class="row">
+          <div class="field">
+            <label>Пароль админки</label>
+            <input name="password" type="password" required>
+          </div>
+          <div class="field">
+            <label>ID</label>
+            <input name="id" type="text" value="${esc(campaign._id || "")}" ${existing ? "readonly" : ""}>
+            <small>Например: reels_oct_14. После создания лучше не менять.</small>
+          </div>
+          <div class="field">
+            <label>Статус</label>
+            <select name="status">
+              <option value="active" ${campaign.status !== "paused" ? "selected" : ""}>Active</option>
+              <option value="paused" ${campaign.status === "paused" ? "selected" : ""}>Paused</option>
+            </select>
+          </div>
+        </div>
+      </section>
+
+      <section class="section">
+        <h2>Основное</h2>
+        <div class="row">
+          <div class="field">
+            <label>Название</label>
+            <input name="name" type="text" value="${esc(campaign.name || "")}" required>
+          </div>
+          <div class="field">
+            <label>Priority</label>
+            <input name="priority" type="number" value="${esc(campaign.priority || 0)}">
+            <small>Если несколько автоматизаций подходят, выше priority выбирается раньше.</small>
+          </div>
+          <div class="field">
+            <label>Landing URL</label>
+            <input name="landingUrl" type="text" value="${esc(campaign.landingUrl || config.landingUrl)}">
+          </div>
+        </div>
+      </section>
+
+      <section class="section">
+        <h2>Instagram trigger</h2>
+        <div class="toggles">
+          <label class="toggle">Комментарии <input name="comments" type="checkbox" ${checked(triggers.comments)}></label>
+          <label class="toggle">Direct <input name="directMessages" type="checkbox" ${checked(triggers.directMessages)}></label>
+          <label class="toggle">Share/Repost <input name="shares" type="checkbox" ${checked(triggers.shares)}></label>
+          <label class="toggle">Публичный ответ <input name="publicReplyEnabled" type="checkbox" ${checked(campaign.instagram?.publicReplyEnabled)}></label>
+        </div>
+        <div class="row" style="margin-top:14px">
+          <div class="field">
+            <label>Manual media IDs</label>
+            <textarea id="mediaIdsInput" name="mediaIds">${esc((campaign.mediaIds || []).join("\n"))}</textarea>
+            <small>Можно оставить пустым, если выбрал посты ниже. Пусто = любой пост.</small>
+          </div>
+          <div class="field">
+            <label>Keywords</label>
+            <textarea name="keywords">${esc((campaign.keywords || []).join(", "))}</textarea>
+            <small>Через запятую. Пусто = любой комментарий.</small>
+          </div>
+          <div class="field">
+            <label>Direct image</label>
+            ${renderMediaSelect("directImageId", campaign.instagram?.directMedia?.imageId || "", mediaFiles, "Без картинки", "image/")}
+            <small>Файлы берутся из Media library.</small>
+          </div>
+        </div>
+        ${renderPostPicker(posts, selectedMediaIds)}
+      </section>
+
+      <section class="section">
+        <h2>Instagram message</h2>
+        <div class="row">
+          <div class="field">
+            <label>Текст Direct</label>
+            <textarea name="directText">${esc(directMessage.text || "")}</textarea>
+          </div>
+          <div class="field">
+            <label>Текст кнопки</label>
+            <input name="directButtonText" type="text" value="${esc(directMessage.buttonText || "")}">
+          </div>
+          <div class="field">
+            <label>Публичный ответ</label>
+            <input name="publicCommentReply" type="text" value="${esc(campaign.instagram?.publicCommentReply || "")}">
+          </div>
+        </div>
+      </section>
+
+      <section class="section">
+        <h2>Telegram route</h2>
+        <div class="row">
+          <div class="field">
+            <label>Канал для проверки</label>
+            <input name="channelUsername" type="text" value="${esc(campaign.telegram?.channelUsername || config.telegram?.channelUsername || "")}">
+          </div>
+          <div class="field">
+            <label>Start payload</label>
+            <input name="startPayload" type="text" value="${esc(campaign.telegram?.startPayload || "")}">
+            <small>Один общий бот, разные автоматизации через payload.</small>
+          </div>
+          <div class="field">
+            <label>Subscribed photo media ID</label>
+            ${renderMediaSelect("subscribedPhotoId", campaign.telegramMedia?.subscribedPhotoId || "", mediaFiles, "Без фото", "image/")}
+          </div>
+        </div>
+      </section>
+
+      <section class="section">
+        <h2>Telegram texts</h2>
+        <div class="row">
+          <div class="field">
+            <label>Приветствие</label>
+            <textarea name="tgWelcome">${esc(campaign.telegramTexts?.welcome || "")}</textarea>
+          </div>
+          <div class="field">
+            <label>Если не подписан</label>
+            <textarea name="tgNotSubscribed">${esc(campaign.telegramTexts?.notSubscribed || "")}</textarea>
+          </div>
+          <div class="field">
+            <label>Если подписан</label>
+            <textarea name="tgSubscribed">${esc(campaign.telegramTexts?.subscribed || "")}</textarea>
+          </div>
+        </div>
+        <div class="row" style="margin-top:14px">
+          <div class="field">
+            <label>Welcome photo 1 media ID</label>
+            ${renderMediaSelect("welcomePhoto1Id", campaign.telegramMedia?.welcomePhoto1Id || "", mediaFiles, "Без фото", "image/")}
+          </div>
+          <div class="field">
+            <label>Circle video media ID</label>
+            ${renderMediaSelect("welcomeCircleVideoId", campaign.telegramMedia?.welcomeCircleVideoId || "", mediaFiles, "Без видео", "video/")}
+          </div>
+          <div class="field">
+            <label>Welcome photo 2 media ID</label>
+            ${renderMediaSelect("welcomePhoto2Id", campaign.telegramMedia?.welcomePhoto2Id || "", mediaFiles, "Без фото", "image/")}
+          </div>
+        </div>
+      </section>
+
+      <div class="actions">
+        <a class="button" href="/admin/campaigns">Назад</a>
+        <button class="primary" type="submit">Сохранить автоматизацию</button>
+      </div>
+    </form>
+    <script>
+      const form = document.getElementById("campaignForm");
+      const mediaIdsInput = document.getElementById("mediaIdsInput");
+      form.addEventListener("submit", () => {
+        const checked = Array.from(document.querySelectorAll("[data-post-id]:checked")).map((item) => item.value);
+        if (checked.length) mediaIdsInput.value = checked.join("\\n");
+      });
+    </script>`;
+  return renderAdminShell(existing ? "Редактировать автоматизацию" : "Новая автоматизация", config, content);
+}
+
+function renderPostPicker(posts, selectedIds) {
+  if (!posts.length) {
+    return `
+      <div class="panel" style="box-shadow:none;margin-top:14px">
+        <h2>Instagram posts/Reels</h2>
+        <p class="muted">Посты еще не синхронизированы. Открой /admin/posts и нажми синхронизацию, потом вернись сюда.</p>
+        <a class="button" href="/admin/posts">Открыть Posts</a>
+      </div>`;
+  }
+
+  return `
+    <div style="margin-top:18px">
+      <h2>Выбрать posts/Reels</h2>
+      <div class="post-picker">
+        ${posts.map((post) => renderPostPickerItem(post, selectedIds.has(String(post.id)))).join("")}
+      </div>
+    </div>`;
+}
+
+function renderPostPickerItem(post, selected) {
+  const imageUrl = post.thumbnailUrl || post.mediaUrl || "";
+  const preview = imageUrl
+    ? `<img src="${esc(imageUrl)}" alt="" class="post-thumb">`
+    : `<div class="post-thumb placeholder">No preview</div>`;
+  return `
+    <label class="post-option">
+      <input data-post-id type="checkbox" value="${esc(post.id)}" ${checked(selected)}>
+      ${preview}
+      <span>
+        <strong>${esc(post.mediaType || "MEDIA")}</strong>
+        <small>${esc(truncateText(post.caption || post.id, 70))}</small>
+      </span>
+    </label>`;
+}
+
+function renderMediaSelect(name, selectedId, files, emptyLabel, contentPrefix) {
+  const filtered = files
+    .filter((file) => !contentPrefix || String(file.contentType || "").startsWith(contentPrefix))
+  const hasSelected = !selectedId || filtered.some((file) => file.id === selectedId);
+  const customOption = selectedId && !hasSelected
+    ? `<option value="${esc(selectedId)}" selected>${esc(`Current: ${selectedId}`)}</option>`
+    : "";
+  const options = filtered
+    .map((file) => `<option value="${esc(file.id)}" ${file.id === selectedId ? "selected" : ""}>${esc(mediaOptionLabel(file))}</option>`)
+    .join("");
+
+  return `
+    <select name="${esc(name)}">
+      <option value="">${esc(emptyLabel)}</option>
+      ${customOption}
+      ${options}
+    </select>`;
+}
+
+function mediaOptionLabel(file) {
+  const purpose = file.metadata?.purpose ? ` · ${file.metadata.purpose}` : "";
+  return `${file.filename} · ${formatBytes(file.length)}${purpose}`;
+}
+
+function renderComingSoon(title, text) {
+  return `
+    <section class="panel">
+      <h2>${esc(title)}</h2>
+      <p class="muted">${esc(text)}</p>
+      <div class="meta">
+        <a class="button" href="/admin/campaigns">Автоматизации</a>
+        <a class="button" href="/admin">Settings</a>
+      </div>
+    </section>`;
+}
+
+function renderMediaLibrary(config, files, mongoEnabled) {
+  const content = `
+    <form class="section" method="post" action="/admin/media" enctype="multipart/form-data">
+      <h2>Загрузить файл</h2>
+      <div class="row">
+        <div class="field">
+          <label>Пароль админки</label>
+          <input name="password" type="password" required>
+        </div>
+        <div class="field">
+          <label>Purpose</label>
+          <input name="purpose" type="text" value="media_library">
+          <small>Например: instagram_direct_image или telegram_subscribed_photo.</small>
+        </div>
+        <div class="field">
+          <label>Файл</label>
+          <input name="mediaFile" type="file" accept="image/*,video/*" required>
+          <small>Текущий лимит загрузки: ${formatBytes(MAX_IMAGE_UPLOAD_BYTES)}.</small>
+        </div>
+      </div>
+      <div class="actions">
+        <div class="muted">Файл сохранится в MongoDB GridFS и появится ниже.</div>
+        <button class="primary" type="submit">Загрузить</button>
+      </div>
+    </form>
+
+    ${mongoEnabled ? renderMediaGrid(files) : `
+      <section class="panel">
+        <h2>MongoDB не настроен</h2>
+        <p class="muted">Media library работает только при настроенном MONGODB_URI.</p>
+      </section>`}
+
+    <script>
+      for (const button of document.querySelectorAll("[data-copy]")) {
+        button.addEventListener("click", async () => {
+          const value = button.getAttribute("data-copy");
+          try {
+            await navigator.clipboard.writeText(value);
+            button.textContent = "Скопировано";
+            setTimeout(() => { button.textContent = "Copy ID"; }, 1200);
+          } catch {
+            prompt("Media ID", value);
+          }
+        });
+      }
+    </script>`;
+  return renderAdminShell("Media library", config, content);
+}
+
+function renderInstagramPosts(config, posts, mongoEnabled) {
+  const content = `
+    <form class="section" method="post" action="/admin/posts">
+      <h2>Синхронизация</h2>
+      <div class="row">
+        <div class="field">
+          <label>Пароль админки</label>
+          <input name="password" type="password" required>
+        </div>
+        <div class="field">
+          <label>Источник</label>
+          <input type="text" value="META_ACCESS_TOKEN / /me/media" readonly>
+          <small>OAuth пока не используем. Синхронизируется текущий подключенный Instagram аккаунт.</small>
+        </div>
+        <div class="field">
+          <label>Состояние</label>
+          <input type="text" value="${mongoEnabled ? `${posts.length} saved posts/Reels` : "MongoDB не настроен"}" readonly>
+        </div>
+      </div>
+      <div class="actions">
+        <div class="muted">После sync скопируй media ID или permalink, затем вставь media ID в автоматизацию.</div>
+        <button class="primary" type="submit" ${mongoEnabled ? "" : "disabled"}>Синхронизировать posts/Reels</button>
+      </div>
+    </form>
+
+    ${mongoEnabled ? renderInstagramPostGrid(posts) : `
+      <section class="panel">
+        <h2>MongoDB не настроен</h2>
+        <p class="muted">Список постов хранится в MongoDB, поэтому нужен MONGODB_URI.</p>
+      </section>`}
+
+    <script>
+      for (const button of document.querySelectorAll("[data-copy]")) {
+        button.addEventListener("click", async () => {
+          const value = button.getAttribute("data-copy");
+          try {
+            await navigator.clipboard.writeText(value);
+            button.textContent = "Скопировано";
+            setTimeout(() => { button.textContent = "Copy ID"; }, 1200);
+          } catch {
+            prompt("Media ID", value);
+          }
+        });
+      }
+    </script>`;
+  return renderAdminShell("Instagram posts", config, content);
+}
+
+function renderInstagramPostGrid(posts) {
+  if (!posts.length) {
+    return `
+      <section class="panel">
+        <h2>Посты еще не синхронизированы</h2>
+        <p class="muted">Нажми синхронизацию выше. После этого здесь появятся post/Reels media IDs для автоматизаций.</p>
+      </section>`;
+  }
+
+  return `
+    <section class="grid">
+      ${posts.map(renderInstagramPostCard).join("")}
+    </section>`;
+}
+
+function renderInstagramPostCard(post) {
+  const imageUrl = post.thumbnailUrl || post.mediaUrl || "";
+  const preview = imageUrl
+    ? `<img src="${esc(imageUrl)}" alt="" style="width:100%;aspect-ratio:1/1;object-fit:cover;border-radius:8px;border:1px solid rgba(255,255,255,.7)">`
+    : `<div class="panel" style="box-shadow:none;aspect-ratio:1/1;display:grid;place-items:center">No preview</div>`;
+  const caption = truncateText(post.caption || "", 120);
+
+  return `
+    <article class="card">
+      ${preview}
+      <div class="meta">
+        <span class="pill">${esc(post.mediaType || "MEDIA")}</span>
+        <span class="pill">${esc(formatInstagramDate(post.timestamp))}</span>
+      </div>
+      <p>${esc(caption || "Без подписи")}</p>
+      <input type="text" readonly value="${esc(post.id)}" onclick="this.select()">
+      <div class="meta">
+        <button type="button" data-copy="${esc(post.id)}">Copy ID</button>
+        ${post.permalink ? `<a class="button" href="${esc(post.permalink)}" target="_blank" rel="noreferrer">Instagram</a>` : ""}
+      </div>
+    </article>`;
+}
+
+function formatInstagramDate(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit", year: "2-digit" });
+}
+
+function truncateText(value, maxLength) {
+  const text = String(value || "");
+  return text.length > maxLength ? `${text.slice(0, maxLength - 3)}...` : text;
+}
+
+function renderMediaGrid(files) {
+  if (!files.length) {
+    return `
+      <section class="panel">
+        <h2>Файлов пока нет</h2>
+        <p class="muted">Загрузи первое изображение или видео, затем используй media ID в автоматизациях.</p>
+      </section>`;
+  }
+
+  return `
+    <section class="grid">
+      ${files.map(renderMediaCard).join("")}
+    </section>`;
+}
+
+function renderMediaCard(file) {
+  const url = mediaAdminUrl(file.id);
+  const isImage = String(file.contentType || "").startsWith("image/");
+  const isVideo = String(file.contentType || "").startsWith("video/");
+  const preview = isImage
+    ? mediaPreview(url, file.filename)
+    : isVideo
+      ? videoPreview(url)
+      : `<div class="panel" style="box-shadow:none;min-height:180px;display:grid;place-items:center">No preview</div>`;
+
+  return `
+    <article class="card">
+      ${preview}
+      <div class="meta">
+        <span class="pill">${esc(file.contentType || "unknown")}</span>
+        <span class="pill">${formatBytes(file.length)}</span>
+      </div>
+      <h2 style="margin-top:14px">${esc(file.filename)}</h2>
+      <p class="muted">Purpose: ${esc(file.metadata?.purpose || "unknown")}</p>
+      <p class="muted">Uploaded: ${esc(formatDate(file.uploadDate))}</p>
+      <input type="text" readonly value="${esc(file.id)}" onclick="this.select()">
+      <div class="meta">
+        <button type="button" data-copy="${esc(file.id)}">Copy ID</button>
+        <a class="button" href="${esc(url)}" target="_blank" rel="noreferrer">Open</a>
+        <a class="button" href="${esc(url)}&info=1" target="_blank" rel="noreferrer">Info</a>
+      </div>
+    </article>`;
 }
 
 function renderAdmin(config) {

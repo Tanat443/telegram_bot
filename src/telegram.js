@@ -1,5 +1,5 @@
-import { normalizeUrl } from "./config.js";
-import { recordEvent, upsertTelegramUser } from "./db.js";
+import { normalizeUrl, readConfigForCampaignId, readConfigForStartPayload } from "./config.js";
+import { getTelegramUser, recordEvent, upsertTelegramUser } from "./db.js";
 
 const TELEGRAM_API = "https://api.telegram.org/bot";
 
@@ -81,16 +81,22 @@ export class TelegramBot {
   async handleMessage(message) {
     const text = message.text || "";
     if (text.startsWith("/start")) {
-      const config = await this.configProvider();
-      console.log(`Telegram /start from ${message.from?.id}`);
+      const startPayload = parseStartPayload(text);
+      const config = await readConfigForStartPayload(startPayload);
+      console.log(`Telegram /start from ${message.from?.id}; campaign=${config.campaign?.id || "default"}`);
       await upsertTelegramUser(message.from, {
         lastStartAt: new Date(),
-        lastChatId: message.chat.id
+        lastChatId: message.chat.id,
+        activeCampaignId: config.campaign?.id || "default",
+        activeCampaignName: config.campaign?.name || "Default campaign",
+        activeStartPayload: config.telegram.startPayload || startPayload || ""
       });
       await recordEvent("telegram_started", {
         telegramId: message.from?.id,
         chatId: message.chat.id,
-        text
+        text,
+        campaignId: config.campaign?.id || "default",
+        campaignName: config.campaign?.name || "Default campaign"
       });
       await this.sendWelcome(message.chat.id, config);
       return;
@@ -182,23 +188,30 @@ export class TelegramBot {
   }
 
   async handleCallback(callback) {
-    const config = await this.configProvider();
     if (callback.data !== "check_subscription") return;
 
     await this.api("answerCallbackQuery", { callback_query_id: callback.id });
     const userId = callback.from.id;
+    const storedUser = await getTelegramUser(userId);
+    const config = storedUser?.activeCampaignId
+      ? await readConfigForCampaignId(storedUser.activeCampaignId)
+      : await this.configProvider();
     const subscribed = await this.isSubscribed(config.telegram.channelUsername, userId);
     console.log(`Telegram subscription check: user=${userId} channel=${config.telegram.channelUsername} subscribed=${subscribed}`);
     await upsertTelegramUser(callback.from, {
       lastSubscriptionCheckAt: new Date(),
       lastSubscriptionStatus: subscribed,
-      channelUsername: config.telegram.channelUsername
+      channelUsername: config.telegram.channelUsername,
+      activeCampaignId: config.campaign?.id || storedUser?.activeCampaignId || "default",
+      activeCampaignName: config.campaign?.name || storedUser?.activeCampaignName || "Default campaign"
     });
     await recordEvent("telegram_subscription_checked", {
       telegramId: userId,
       chatId: callback.message.chat.id,
       channelUsername: config.telegram.channelUsername,
-      subscribed
+      subscribed,
+      campaignId: config.campaign?.id || storedUser?.activeCampaignId || "default",
+      campaignName: config.campaign?.name || storedUser?.activeCampaignName || "Default campaign"
     });
 
     if (!subscribed) {
@@ -225,7 +238,9 @@ export class TelegramBot {
     await recordEvent("telegram_subscribed_response_started", {
       chatId,
       hasSubscribedPhoto: Boolean(imageId),
-      imageId: imageId || ""
+      imageId: imageId || "",
+      campaignId: config.campaign?.id || "default",
+      campaignName: config.campaign?.name || "Default campaign"
     });
 
     if (imageId && process.env.PUBLIC_BASE_URL) {
@@ -265,6 +280,11 @@ export class TelegramBot {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parseStartPayload(text) {
+  const parts = String(text || "").trim().split(/\s+/);
+  return parts[0] === "/start" ? parts.slice(1).join(" ").trim() : "";
 }
 
 function truncateCaption(text) {
