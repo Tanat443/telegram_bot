@@ -13,6 +13,10 @@ export class TelegramBot {
   }
 
   async api(method, payload = {}) {
+    if (!this.token) {
+      throw new Error("TELEGRAM_BOT_TOKEN is not configured");
+    }
+
     const response = await fetch(`${TELEGRAM_API}${this.token}/${method}`, {
       method: "POST",
       headers: { "content-type": "application/json" },

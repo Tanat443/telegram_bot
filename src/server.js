@@ -1,7 +1,7 @@
 import http from "node:http";
 import Busboy from "busboy";
 import { URL } from "node:url";
-import { getEnv, loadDotEnv, normalizeUrl, readConfig, requireEnv, writeConfig } from "./config.js";
+import { getEnv, loadDotEnv, normalizeUrl, readConfig, writeConfig } from "./config.js";
 import { getMediaFile, getStats, hasMongo, saveMediaFile } from "./db.js";
 import { MetaClient } from "./meta.js";
 import { TelegramBot } from "./telegram.js";
@@ -12,14 +12,20 @@ const port = Number(getEnv("PORT", "3000"));
 const adminPassword = getEnv("ADMIN_PASSWORD", "admin");
 const verifyToken = getEnv("META_VERIFY_TOKEN", "verify-token");
 const telegramWebhookSecret = getEnv("TELEGRAM_WEBHOOK_SECRET");
+const telegramToken = getEnv("TELEGRAM_BOT_TOKEN");
+const MAX_IMAGE_UPLOAD_BYTES = 1.5 * 1024 * 1024;
 
 const telegram = new TelegramBot({
-  token: requireEnv("TELEGRAM_BOT_TOKEN"),
+  token: telegramToken,
   configProvider: readConfig,
   botUsername: getEnv("TELEGRAM_BOT_USERNAME")
 });
 
-await telegram.init();
+try {
+  await telegram.init();
+} catch (error) {
+  console.error(`Telegram init skipped: ${error.message}`);
+}
 
 const meta = new MetaClient({
   accessToken: getEnv("META_ACCESS_TOKEN"),
@@ -54,6 +60,20 @@ const server = http.createServer(async (req, res) => {
         ok: true,
         service: "instagram-telegram-gate",
         route: "/api/ping"
+      });
+    }
+
+    if (req.method === "GET" && url.pathname === "/health") {
+      return sendJson(res, 200, {
+        ok: true,
+        service: "instagram-telegram-gate",
+        env: {
+          hasTelegramToken: Boolean(getEnv("TELEGRAM_BOT_TOKEN")),
+          hasTelegramUsername: Boolean(getEnv("TELEGRAM_BOT_USERNAME")),
+          hasMetaToken: Boolean(getEnv("META_ACCESS_TOKEN")),
+          hasMongoUri: Boolean(getEnv("MONGODB_URI")),
+          publicBaseUrl: getEnv("PUBLIC_BASE_URL") || ""
+        }
       });
     }
 
@@ -178,7 +198,11 @@ async function handleAdmin(req, res) {
   }
 
   if (req.method === "POST") {
-    const { fields: form, files } = await readFormData(req);
+    const { fields: form, files, errors } = await readFormData(req);
+    if (errors.length) {
+      return sendHtml(res, renderMessage(errors.join("<br>"), "/admin"), 400);
+    }
+
     if (form.password !== adminPassword) {
       return sendHtml(res, renderMessage("Неверный пароль", "/admin"), 401);
     }
@@ -211,8 +235,8 @@ async function handleAdmin(req, res) {
       if (!files.welcomeImage.contentType?.startsWith("image/")) {
         return sendHtml(res, renderMessage("Можно загрузить только изображение", "/admin"), 400);
       }
-      if (files.welcomeImage.buffer.length > 4 * 1024 * 1024) {
-        return sendHtml(res, renderMessage("Картинка слишком большая. Максимум 4 MB", "/admin"), 400);
+      if (files.welcomeImage.buffer.length > MAX_IMAGE_UPLOAD_BYTES) {
+        return sendHtml(res, renderMessage("Картинка слишком большая. Максимум 1.5 MB", "/admin"), 400);
       }
 
       const imageId = await saveMediaFile({
@@ -736,8 +760,8 @@ function renderAdmin(config) {
       <div class="row" style="margin-top:14px">
         <div class="field">
           <label>Картинка приветствия</label>
-          <input name="welcomeImage" type="file" accept="image/*">
-          <small>Хранится в MongoDB GridFS. Максимум 4 MB.</small>
+          <input id="welcomeImageInput" name="welcomeImage" type="file" accept="image/*">
+          <small>Хранится в MongoDB GridFS. Перед сохранением браузер попробует сжать до 1.5 MB.</small>
         </div>
         <div class="field">
           <label>Текущая картинка</label>
@@ -771,6 +795,7 @@ function renderAdmin(config) {
 </main>
 <script>
   const passwordInput = document.getElementById("adminPassword");
+  const welcomeImageInput = document.getElementById("welcomeImageInput");
   const authLinks = Array.from(document.querySelectorAll("[data-auth-link]"));
   function syncAuthLinks() {
     const value = encodeURIComponent(passwordInput.value || "");
@@ -778,6 +803,47 @@ function renderAdmin(config) {
   }
   passwordInput.addEventListener("input", syncAuthLinks);
   syncAuthLinks();
+
+  welcomeImageInput.addEventListener("change", async () => {
+    const file = welcomeImageInput.files && welcomeImageInput.files[0];
+    if (!file || !file.type.startsWith("image/")) return;
+    if (file.size <= ${Math.floor(MAX_IMAGE_UPLOAD_BYTES)}) return;
+
+    try {
+      const compressed = await compressImage(file, ${Math.floor(MAX_IMAGE_UPLOAD_BYTES)});
+      const dataTransfer = new DataTransfer();
+      dataTransfer.items.add(compressed);
+      welcomeImageInput.files = dataTransfer.files;
+    } catch (error) {
+      alert("Не получилось сжать картинку. Выберите файл меньше 1.5 MB.");
+    }
+  });
+
+  async function compressImage(file, maxBytes) {
+    const bitmap = await createImageBitmap(file);
+    const canvas = document.createElement("canvas");
+    const maxSide = 1600;
+    const scale = Math.min(1, maxSide / Math.max(bitmap.width, bitmap.height));
+    canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+    canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+
+    for (const quality of [0.86, 0.78, 0.68, 0.58]) {
+      const blob = await canvasToBlob(canvas, "image/jpeg", quality);
+      if (blob.size <= maxBytes) {
+        return new File([blob], file.name.replace(/\\.[^.]+$/, "") + ".jpg", { type: "image/jpeg" });
+      }
+    }
+
+    throw new Error("compressed image is still too large");
+  }
+
+  function canvasToBlob(canvas, type, quality) {
+    return new Promise((resolve, reject) => {
+      canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error("canvas export failed")), type, quality);
+    });
+  }
 </script>
 </body>
 </html>`;
@@ -908,7 +974,8 @@ async function readFormData(req) {
   if (!contentType.includes("multipart/form-data")) {
     return {
       fields: await readForm(req),
-      files: {}
+      files: {},
+      errors: []
     };
   }
 
@@ -918,7 +985,7 @@ async function readFormData(req) {
     const busboy = Busboy({
       headers: req.headers,
       limits: {
-        fileSize: 4 * 1024 * 1024,
+        fileSize: MAX_IMAGE_UPLOAD_BYTES,
         files: 4,
         fields: 80
       }
@@ -930,9 +997,20 @@ async function readFormData(req) {
 
     busboy.on("file", (name, file, info) => {
       const chunks = [];
-      file.on("data", (chunk) => chunks.push(chunk));
-      file.on("limit", () => reject(new Error("Uploaded file is too large")));
+      let tooLarge = false;
+      file.on("data", (chunk) => {
+        if (!tooLarge) chunks.push(chunk);
+      });
+      file.on("limit", () => {
+        tooLarge = true;
+        chunks.length = 0;
+      });
       file.on("end", () => {
+        if (tooLarge) {
+          files[name] = { tooLarge: true };
+          return;
+        }
+
         const buffer = Buffer.concat(chunks);
         if (buffer.length > 0) {
           files[name] = {
@@ -945,7 +1023,12 @@ async function readFormData(req) {
     });
 
     busboy.on("error", reject);
-    busboy.on("finish", () => resolve({ fields, files }));
+    busboy.on("finish", () => {
+      const errors = Object.values(files).some((file) => file.tooLarge)
+        ? ["Картинка слишком большая. Максимум 1.5 MB."]
+        : [];
+      resolve({ fields, files, errors });
+    });
     req.pipe(busboy);
   });
 }
