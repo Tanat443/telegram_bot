@@ -181,8 +181,10 @@ export async function saveMediaFile({ buffer, filename, contentType, metadata = 
   const bucket = new GridFSBucket(db, { bucketName: "media" });
   return new Promise((resolve, reject) => {
     const upload = bucket.openUploadStream(filename || "upload", {
-      contentType,
-      metadata
+      metadata: {
+        ...metadata,
+        contentType
+      }
     });
     upload.on("error", reject);
     upload.on("finish", () => resolve(String(upload.id)));

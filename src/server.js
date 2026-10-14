@@ -299,7 +299,7 @@ async function handleMedia(url, res) {
       ok: true,
       id,
       filename: media.file.filename,
-      contentType: media.file.contentType,
+      contentType: mediaContentType(media.file),
       length: media.file.length,
       uploadDate: media.file.uploadDate,
       metadata: media.file.metadata || {}
@@ -307,8 +307,9 @@ async function handleMedia(url, res) {
   }
 
   res.writeHead(200, {
-    "content-type": media.file.contentType || "application/octet-stream",
+    "content-type": mediaContentType(media.file),
     "content-length": media.file.length,
+    "content-disposition": `inline; filename="${safeHeaderFilename(media.file.filename || "media")}"`,
     "cache-control": "public, max-age=31536000, immutable"
   });
   media.stream.on("error", (error) => {
@@ -317,6 +318,29 @@ async function handleMedia(url, res) {
     else res.destroy(error);
   });
   media.stream.pipe(res);
+}
+
+function mediaContentType(file) {
+  return file.contentType || file.metadata?.contentType || inferContentType(file.filename) || "application/octet-stream";
+}
+
+function inferContentType(filename = "") {
+  const ext = filename.toLowerCase().split(".").pop();
+  const types = {
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    png: "image/png",
+    webp: "image/webp",
+    gif: "image/gif",
+    mp4: "video/mp4",
+    mov: "video/quicktime",
+    webm: "video/webm"
+  };
+  return types[ext] || "";
+}
+
+function safeHeaderFilename(filename) {
+  return String(filename).replaceAll(/["\r\n]/g, "_");
 }
 
 async function handleStats(url, res) {
