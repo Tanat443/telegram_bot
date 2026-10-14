@@ -1,4 +1,5 @@
 import http from "node:http";
+import crypto from "node:crypto";
 import Busboy from "busboy";
 import { URL } from "node:url";
 import { getEnv, loadDotEnv, normalizeUrl, readConfig, writeConfig } from "./config.js";
@@ -10,6 +11,7 @@ await loadDotEnv();
 
 const port = Number(getEnv("PORT", "3000"));
 const adminPassword = getEnv("ADMIN_PASSWORD", "admin");
+const adminSessionSecret = getEnv("ADMIN_SESSION_SECRET", adminPassword);
 const verifyToken = getEnv("META_VERIFY_TOKEN", "verify-token");
 const telegramWebhookSecret = getEnv("TELEGRAM_WEBHOOK_SECRET");
 const telegramToken = getEnv("TELEGRAM_BOT_TOKEN");
@@ -79,6 +81,14 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
+    if (url.pathname === "/admin/login") {
+      return handleAdminLogin(req, res, url);
+    }
+
+    if (url.pathname === "/admin/logout") {
+      return handleAdminLogout(req, res);
+    }
+
     if (url.pathname === "/admin") {
       return handleAdmin(req, res);
     }
@@ -104,11 +114,11 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === "GET" && url.pathname === "/admin/media-debug") {
-      return handleMediaDebug(url, res);
+      return handleMediaDebug(req, res);
     }
 
     if (req.method === "GET" && url.pathname === "/stats") {
-      return handleStats(url, res);
+      return handleStats(req, url, res);
     }
 
     if (req.method === "GET" && url.pathname === "/telegram/set-webhook") {
@@ -116,7 +126,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === "GET" && url.pathname === "/telegram/webhook-info") {
-      return getTelegramWebhookInfo(url, res);
+      return getTelegramWebhookInfo(req, res);
     }
 
     if (req.method === "GET" && isMetaWebhookPath(url.pathname) && url.searchParams.get("debug") === "1") {
@@ -188,9 +198,7 @@ function shouldUseTelegramPolling() {
 }
 
 async function setTelegramWebhook(url, req, res) {
-  if (url.searchParams.get("password") !== adminPassword) {
-    return sendJson(res, 401, { error: "Unauthorized" });
-  }
+  if (!requireAdmin(req, res, "/telegram/set-webhook")) return;
 
   const baseUrl = getEnv("PUBLIC_BASE_URL") || `https://${req.headers.host}`;
   const webhookUrl = `${normalizeUrl(baseUrl).replace(/\/$/, "")}/webhooks/telegram`;
@@ -208,16 +216,143 @@ async function setTelegramWebhook(url, req, res) {
   return sendJson(res, 200, { ok: true, webhookUrl, result });
 }
 
-async function getTelegramWebhookInfo(url, res) {
-  if (url.searchParams.get("password") !== adminPassword) {
-    return sendJson(res, 401, { error: "Unauthorized" });
-  }
+async function getTelegramWebhookInfo(req, res) {
+  if (!requireAdmin(req, res, "/telegram/webhook-info")) return;
 
   const info = await telegram.api("getWebhookInfo");
   return sendJson(res, 200, { ok: true, info });
 }
 
+async function handleAdminLogin(req, res, url) {
+  if (req.method === "GET") {
+    return sendHtml(res, renderLogin(url.searchParams.get("next") || "/admin"));
+  }
+
+  if (req.method !== "POST") return sendJson(res, 405, { error: "Method not allowed" });
+
+  const form = await readForm(req);
+  const next = safeNextPath(form.next || "/admin");
+  if (!timingSafeEqual(form.password || "", adminPassword)) {
+    return sendHtml(res, renderLogin(next, "Неверный пароль"), 401);
+  }
+
+  res.writeHead(302, {
+    location: next,
+    "set-cookie": adminSessionCookie()
+  });
+  res.end();
+}
+
+function handleAdminLogout(req, res) {
+  if (req.method !== "GET" && req.method !== "POST") return sendJson(res, 405, { error: "Method not allowed" });
+
+  res.writeHead(302, {
+    location: "/admin/login",
+    "set-cookie": clearAdminSessionCookie()
+  });
+  res.end();
+}
+
+function requireAdmin(req, res, redirectTo = "") {
+  if (isAdminAuthenticated(req)) return true;
+
+  const next = redirectTo || req.url || "/admin";
+  res.writeHead(302, { location: `/admin/login?next=${encodeURIComponent(safeNextPath(next))}` });
+  res.end();
+  return false;
+}
+
+function isAdminAuthenticated(req) {
+  const cookies = parseCookies(req.headers.cookie || "");
+  const token = cookies.admin_session || "";
+  const [payload, signature] = token.split(".");
+  if (!payload || !signature) return false;
+  if (!timingSafeEqual(signSessionPayload(payload), signature)) return false;
+
+  let data;
+  try {
+    data = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+  } catch {
+    return false;
+  }
+
+  return data?.role === "admin" && Number(data.exp || 0) > Date.now();
+}
+
+function adminSessionCookie() {
+  const payload = Buffer.from(JSON.stringify({
+    role: "admin",
+    exp: Date.now() + 7 * 24 * 60 * 60 * 1000
+  })).toString("base64url");
+  const token = `${payload}.${signSessionPayload(payload)}`;
+  return serializeCookie("admin_session", token, {
+    httpOnly: true,
+    sameSite: "Lax",
+    secure: isSecureCookie(),
+    path: "/",
+    maxAge: 7 * 24 * 60 * 60
+  });
+}
+
+function clearAdminSessionCookie() {
+  return serializeCookie("admin_session", "", {
+    httpOnly: true,
+    sameSite: "Lax",
+    secure: isSecureCookie(),
+    path: "/",
+    maxAge: 0
+  });
+}
+
+function signSessionPayload(payload) {
+  return crypto
+    .createHmac("sha256", adminSessionSecret || "admin-session")
+    .update(payload)
+    .digest("base64url");
+}
+
+function parseCookies(header) {
+  const cookies = {};
+  for (const part of String(header || "").split(";")) {
+    const eq = part.indexOf("=");
+    if (eq === -1) continue;
+    const name = part.slice(0, eq).trim();
+    const value = part.slice(eq + 1).trim();
+    if (name) cookies[name] = decodeURIComponent(value);
+  }
+  return cookies;
+}
+
+function serializeCookie(name, value, options = {}) {
+  const parts = [`${name}=${encodeURIComponent(value)}`];
+  if (options.maxAge !== undefined) parts.push(`Max-Age=${Math.max(0, Number(options.maxAge || 0))}`);
+  if (options.path) parts.push(`Path=${options.path}`);
+  if (options.httpOnly) parts.push("HttpOnly");
+  if (options.secure) parts.push("Secure");
+  if (options.sameSite) parts.push(`SameSite=${options.sameSite}`);
+  return parts.join("; ");
+}
+
+function isSecureCookie() {
+  return getEnv("VERCEL") === "1" || normalizeUrl(getEnv("PUBLIC_BASE_URL")).startsWith("https://");
+}
+
+function safeNextPath(value) {
+  const path = String(value || "/admin");
+  if (!path.startsWith("/") || path.startsWith("//")) return "/admin";
+  return path;
+}
+
+function timingSafeEqual(a, b) {
+  const left = Buffer.from(String(a || ""));
+  const right = Buffer.from(String(b || ""));
+  if (left.length !== right.length) return false;
+  return crypto.timingSafeEqual(left, right);
+}
+
 async function handleAdmin(req, res) {
+  if (!requireAdmin(req, res)) return;
+
   if (req.method === "GET") {
     const config = await readConfig();
     return sendHtml(res, renderAdmin(config));
@@ -227,10 +362,6 @@ async function handleAdmin(req, res) {
     const { fields: form, files, errors } = await readFormData(req);
     if (errors.length) {
       return sendHtml(res, renderMessage(errors.join("<br>"), "/admin"), 400);
-    }
-
-    if (form.password !== adminPassword) {
-      return sendHtml(res, renderMessage("Неверный пароль", "/admin"), 401);
     }
 
     const config = await readConfig();
@@ -299,6 +430,7 @@ async function handleAdmin(req, res) {
 }
 
 async function handleCampaignList(req, res) {
+  if (!requireAdmin(req, res)) return;
   if (req.method !== "GET") return sendJson(res, 405, { error: "Method not allowed" });
 
   const config = await readConfig();
@@ -306,6 +438,7 @@ async function handleCampaignList(req, res) {
 }
 
 async function handleCampaignEditor(req, res, campaignId) {
+  if (!requireAdmin(req, res)) return;
   const config = await readConfig();
   const campaigns = adminCampaigns(config);
   const campaign = campaignId ? campaigns.find((item) => String(item._id || item.id) === campaignId) : null;
@@ -322,10 +455,6 @@ async function handleCampaignEditor(req, res, campaignId) {
   if (req.method !== "POST") return sendJson(res, 405, { error: "Method not allowed" });
 
   const form = await readForm(req);
-  if (form.password !== adminPassword) {
-    return sendHtml(res, renderMessage("Неверный пароль", campaignId ? `/admin/campaigns/${encodeURIComponent(campaignId)}` : "/admin/campaigns/new"), 401);
-  }
-
   const nextCampaign = normalizeCampaignForm(form, config, campaigns.length);
   const nextCampaigns = campaigns.filter((item) => String(item._id || item.id) !== nextCampaign._id);
   nextCampaigns.push(nextCampaign);
@@ -336,6 +465,7 @@ async function handleCampaignEditor(req, res, campaignId) {
 }
 
 async function handleAdminMedia(req, res) {
+  if (!requireAdmin(req, res)) return;
   const config = await readConfig();
 
   if (req.method === "GET") {
@@ -349,10 +479,6 @@ async function handleAdminMedia(req, res) {
   if (errors.length) {
     return sendHtml(res, renderMessage(errors.join("<br>"), "/admin/media"), 400);
   }
-  if (form.password !== adminPassword) {
-    return sendHtml(res, renderMessage("Неверный пароль", "/admin/media"), 401);
-  }
-
   try {
     const file = files.mediaFile;
     if (!file?.buffer?.length) {
@@ -368,6 +494,7 @@ async function handleAdminMedia(req, res) {
 }
 
 async function handleAdminPosts(req, res) {
+  if (!requireAdmin(req, res)) return;
   const config = await readConfig();
 
   if (req.method === "GET") {
@@ -378,9 +505,6 @@ async function handleAdminPosts(req, res) {
   if (req.method !== "POST") return sendJson(res, 405, { error: "Method not allowed" });
 
   const form = await readForm(req);
-  if (form.password !== adminPassword) {
-    return sendHtml(res, renderMessage("Неверный пароль", "/admin/posts"), 401);
-  }
   if (!hasMongo()) {
     return sendHtml(res, renderMessage("MONGODB_URI не настроен", "/admin/posts"), 400);
   }
@@ -416,10 +540,8 @@ async function saveUploadedMedia(file, purpose, expectedPrefix) {
   return mediaId;
 }
 
-async function handleMediaDebug(url, res) {
-  if (url.searchParams.get("password") !== adminPassword) {
-    return sendJson(res, 401, { error: "Unauthorized" });
-  }
+async function handleMediaDebug(req, res) {
+  if (!requireAdmin(req, res, "/admin/media-debug")) return;
 
   const config = await readConfig();
   return sendJson(res, 200, {
@@ -489,10 +611,8 @@ function safeHeaderFilename(filename) {
   return String(filename).replaceAll(/["\r\n]/g, "_");
 }
 
-async function handleStats(url, res) {
-  if (url.searchParams.get("password") !== adminPassword) {
-    return sendJson(res, 401, { error: "Unauthorized" });
-  }
+async function handleStats(req, url, res) {
+  if (!requireAdmin(req, res, "/stats")) return;
 
   if (!hasMongo()) {
     return sendJson(res, 200, {
@@ -506,7 +626,7 @@ async function handleStats(url, res) {
     return sendJson(res, 200, { ok: true, stats });
   }
 
-  return sendHtml(res, renderStats(stats, url.searchParams.get("password")));
+  return sendHtml(res, renderStats(stats));
 }
 
 function verifyMetaWebhook(url, res) {
@@ -523,7 +643,7 @@ function verifyMetaWebhook(url, res) {
   sendJson(res, 403, { error: "Meta webhook verification failed" });
 }
 
-function renderStats(stats, password) {
+function renderStats(stats) {
   const byType = Array.isArray(stats.byType) ? stats.byType : [];
   const maxCount = Math.max(1, ...byType.map((item) => item.count));
   const recentEvents = Array.isArray(stats.recentEvents) ? stats.recentEvents : [];
@@ -639,7 +759,8 @@ function renderStats(stats, password) {
     </div>
     <nav class="nav">
       <a href="/admin">Admin</a>
-      <a href="/stats?password=${encodeURIComponent(password || "")}&format=json">JSON</a>
+      <a href="/stats?format=json">JSON</a>
+      <a href="/admin/logout">Logout</a>
     </nav>
   </div>
 
@@ -710,6 +831,55 @@ function renderEvent(event) {
     <div class="event-time">${esc(formatDate(event.createdAt))}</div>
     ${details ? `<div class="event-meta">${esc(details)}</div>` : ""}
   </div>`;
+}
+
+function renderLogin(next = "/admin", error = "") {
+  return `<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Admin login</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+      color: #10202f;
+      background: linear-gradient(135deg, #eaf7f4 0%, #eef4ff 42%, #fff3ec 100%);
+    }
+    form {
+      width: min(420px, calc(100% - 32px));
+      border: 1px solid rgba(255,255,255,.72);
+      border-radius: 8px;
+      background: rgba(255,255,255,.62);
+      box-shadow: 0 22px 70px rgba(28, 48, 82, .18);
+      backdrop-filter: blur(22px) saturate(150%);
+      padding: 24px;
+    }
+    h1 { margin: 0 0 8px; font-size: 28px; letter-spacing: 0; }
+    p { margin: 0 0 18px; color: #657487; }
+    label { display: block; font-weight: 800; font-size: 13px; margin-bottom: 7px; }
+    input { width: 100%; border: 1px solid rgba(42, 74, 104, .18); border-radius: 8px; background: rgba(255,255,255,.75); padding: 12px; font: inherit; }
+    button { width: 100%; margin-top: 14px; border: 1px solid rgba(255,255,255,.68); border-radius: 8px; background: linear-gradient(135deg, #1d5fd6, #0f9f94); color: white; font: inherit; font-weight: 800; padding: 12px 14px; cursor: pointer; }
+    .error { color: #9b2c2c; margin-bottom: 12px; font-weight: 800; }
+  </style>
+</head>
+<body>
+  <form method="post" action="/admin/login">
+    <h1>Admin login</h1>
+    <p>Войдите один раз, дальше админка будет работать через защищенную cookie-сессию.</p>
+    ${error ? `<div class="error">${esc(error)}</div>` : ""}
+    <input type="hidden" name="next" value="${esc(safeNextPath(next))}">
+    <label>Пароль</label>
+    <input name="password" type="password" autofocus required>
+    <button type="submit">Войти</button>
+  </form>
+</body>
+</html>`;
 }
 
 function eventTitle(type) {
@@ -1057,6 +1227,8 @@ function renderAdminShell(title, config, content) {
       <a href="/admin/posts">Posts</a>
       <a href="/admin/media">Media</a>
       <a href="/stats">Stats</a>
+      <a href="/telegram/webhook-info">Webhook</a>
+      <a href="/admin/logout">Logout</a>
     </nav>
   </div>
   ${content}
@@ -1122,10 +1294,6 @@ function renderCampaignEditor(config, campaign, existing, posts = [], mediaFiles
       <section class="section">
         <h2>Доступ</h2>
         <div class="row">
-          <div class="field">
-            <label>Пароль админки</label>
-            <input name="password" type="password" required>
-          </div>
           <div class="field">
             <label>ID</label>
             <input name="id" type="text" value="${esc(campaign._id || "")}" ${existing ? "readonly" : ""}>
@@ -1350,10 +1518,6 @@ function renderMediaLibrary(config, files, mongoEnabled) {
       <h2>Загрузить файл</h2>
       <div class="row">
         <div class="field">
-          <label>Пароль админки</label>
-          <input name="password" type="password" required>
-        </div>
-        <div class="field">
           <label>Purpose</label>
           <input name="purpose" type="text" value="media_library">
           <small>Например: instagram_direct_image или telegram_subscribed_photo.</small>
@@ -1398,10 +1562,6 @@ function renderInstagramPosts(config, posts, mongoEnabled) {
     <form class="section" method="post" action="/admin/posts">
       <h2>Синхронизация</h2>
       <div class="row">
-        <div class="field">
-          <label>Пароль админки</label>
-          <input name="password" type="password" required>
-        </div>
         <div class="field">
           <label>Источник</label>
           <input type="text" value="META_ACCESS_TOKEN / /me/media" readonly>
@@ -1677,18 +1837,18 @@ function renderAdmin(config) {
       <p class="subtitle">Панель сценария: комментарий или Direct в Instagram, переход в Telegram, проверка подписки и выдача лендинга.</p>
     </div>
     <nav class="nav">
-      <a data-auth-link="/stats?password=" href="/stats?password=">Stats</a>
-      <a data-auth-link="/telegram/webhook-info?password=" href="/telegram/webhook-info?password=">Telegram webhook</a>
+      <a href="/admin/campaigns">Автоматизации</a>
+      <a href="/admin/posts">Posts</a>
+      <a href="/admin/media">Media</a>
+      <a href="/stats">Stats</a>
+      <a href="/telegram/webhook-info">Telegram webhook</a>
+      <a href="/admin/logout">Logout</a>
     </nav>
   </div>
   <form method="post" action="/admin" enctype="multipart/form-data">
     <section class="section">
-      <h2>Доступ</h2>
+      <h2>Основное</h2>
       <div class="row">
-        <div class="field">
-          <label>Пароль админки</label>
-          <input id="adminPassword" name="password" type="password" required>
-        </div>
         <div class="field">
           <label>Ссылка на лендинг</label>
           <input name="landingUrl" type="text" value="${esc(config.landingUrl)}">
@@ -1859,15 +2019,7 @@ function renderAdmin(config) {
   </form>
 </main>
 <script>
-  const passwordInput = document.getElementById("adminPassword");
   const imageInputs = Array.from(document.querySelectorAll(".media-input"));
-  const authLinks = Array.from(document.querySelectorAll("[data-auth-link]"));
-  function syncAuthLinks() {
-    const value = encodeURIComponent(passwordInput.value || "");
-    for (const link of authLinks) link.href = link.dataset.authLink + value;
-  }
-  passwordInput.addEventListener("input", syncAuthLinks);
-  syncAuthLinks();
 
   for (const input of imageInputs) {
     input.addEventListener("change", async () => {
