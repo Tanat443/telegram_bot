@@ -617,14 +617,18 @@ function videoPreview(url) {
   return `<video src="${esc(url)}" controls muted style="width:100%;max-height:180px;border-radius:8px;border:1px solid rgba(255,255,255,.7)"></video>`;
 }
 
+function mediaAdminUrl(mediaId) {
+  return `/media/${encodeURIComponent(mediaId)}?v=${encodeURIComponent(mediaId)}`;
+}
+
 function renderAdmin(config) {
   const keywords = Array.isArray(config.instagram.keywords) ? config.instagram.keywords.join(", ") : "";
-  const directImageUrl = config.instagram.directMedia?.imageId ? `/media/${config.instagram.directMedia.imageId}` : "";
+  const directImageUrl = config.instagram.directMedia?.imageId ? mediaAdminUrl(config.instagram.directMedia.imageId) : "";
   const welcomePhoto1Id = config.telegramMedia?.welcomePhoto1Id || config.telegramMedia?.welcomeImageId || "";
-  const welcomePhoto1Url = welcomePhoto1Id ? `/media/${welcomePhoto1Id}` : "";
-  const welcomeCircleVideoUrl = config.telegramMedia?.welcomeCircleVideoId ? `/media/${config.telegramMedia.welcomeCircleVideoId}` : "";
-  const welcomePhoto2Url = config.telegramMedia?.welcomePhoto2Id ? `/media/${config.telegramMedia.welcomePhoto2Id}` : "";
-  const subscribedPhotoUrl = config.telegramMedia?.subscribedPhotoId ? `/media/${config.telegramMedia.subscribedPhotoId}` : "";
+  const welcomePhoto1Url = welcomePhoto1Id ? mediaAdminUrl(welcomePhoto1Id) : "";
+  const welcomeCircleVideoUrl = config.telegramMedia?.welcomeCircleVideoId ? mediaAdminUrl(config.telegramMedia.welcomeCircleVideoId) : "";
+  const welcomePhoto2Url = config.telegramMedia?.welcomePhoto2Id ? mediaAdminUrl(config.telegramMedia.welcomePhoto2Id) : "";
+  const subscribedPhotoUrl = config.telegramMedia?.subscribedPhotoId ? mediaAdminUrl(config.telegramMedia.subscribedPhotoId) : "";
   return `<!doctype html>
 <html lang="ru">
 <head>

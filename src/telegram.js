@@ -171,7 +171,7 @@ export class TelegramBot {
   }
 
   mediaUrl(mediaId) {
-    return `${normalizeUrl(process.env.PUBLIC_BASE_URL).replace(/\/$/, "")}/media/${encodeURIComponent(mediaId)}`;
+    return `${normalizeUrl(process.env.PUBLIC_BASE_URL).replace(/\/$/, "")}/media/${encodeURIComponent(mediaId)}?v=${encodeURIComponent(mediaId)}`;
   }
 
   async handleCallback(callback) {
