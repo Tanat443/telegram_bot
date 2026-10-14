@@ -82,6 +82,10 @@ const server = http.createServer(async (req, res) => {
       return handleAdmin(req, res);
     }
 
+    if (req.method === "GET" && url.pathname === "/admin/media-debug") {
+      return handleMediaDebug(url, res);
+    }
+
     if (req.method === "GET" && url.pathname === "/stats") {
       return handleStats(url, res);
     }
@@ -281,11 +285,36 @@ async function saveUploadedMedia(file, purpose, expectedPrefix) {
     throw new Error("Файл слишком большой. Максимум 1.5 MB");
   }
 
-  return saveMediaFile({
+  const mediaId = await saveMediaFile({
     buffer: file.buffer,
     filename: file.filename,
     contentType: file.contentType,
     metadata: { purpose }
+  });
+  if (!mediaId) {
+    throw new Error("Файл не сохранился в MongoDB. Проверьте MONGODB_URI в Vercel.");
+  }
+
+  console.log(`Media uploaded: purpose=${purpose}; id=${mediaId}; filename=${file.filename}; type=${file.contentType}; size=${file.buffer.length}`);
+  return mediaId;
+}
+
+async function handleMediaDebug(url, res) {
+  if (url.searchParams.get("password") !== adminPassword) {
+    return sendJson(res, 401, { error: "Unauthorized" });
+  }
+
+  const config = await readConfig();
+  return sendJson(res, 200, {
+    ok: true,
+    instagramDirectImageId: config.instagram?.directMedia?.imageId || "",
+    telegramMedia: {
+      welcomeImageId: config.telegramMedia?.welcomeImageId || "",
+      welcomePhoto1Id: config.telegramMedia?.welcomePhoto1Id || "",
+      welcomeCircleVideoId: config.telegramMedia?.welcomeCircleVideoId || "",
+      welcomePhoto2Id: config.telegramMedia?.welcomePhoto2Id || "",
+      subscribedPhotoId: config.telegramMedia?.subscribedPhotoId || ""
+    }
   });
 }
 
