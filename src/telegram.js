@@ -151,11 +151,18 @@ export class TelegramBot {
   async sendPhotoOrFallback(chatId, imageId, caption, replyMarkup) {
     try {
       const photoUrl = this.mediaUrl(imageId);
+      console.log(`Telegram photo sending: imageId=${imageId}; url=${photoUrl}`);
       await this.api("sendPhoto", {
         chat_id: chatId,
         photo: photoUrl,
         caption: truncateCaption(caption),
         ...(replyMarkup ? { reply_markup: replyMarkup } : {})
+      });
+      console.log(`Telegram photo sent: imageId=${imageId}`);
+      await recordEvent("telegram_photo_sent", {
+        chatId,
+        imageId,
+        url: photoUrl
       });
       return true;
     } catch (error) {
@@ -214,6 +221,12 @@ export class TelegramBot {
     };
     const text = `${config.telegramTexts.subscribed}\n${normalizeUrl(config.landingUrl)}`;
     const imageId = config.telegramMedia?.subscribedPhotoId;
+    console.log(`Telegram subscribed response: subscribedPhotoId=${imageId || "empty"}`);
+    await recordEvent("telegram_subscribed_response_started", {
+      chatId,
+      hasSubscribedPhoto: Boolean(imageId),
+      imageId: imageId || ""
+    });
 
     if (imageId && process.env.PUBLIC_BASE_URL) {
       const sent = await this.sendPhotoOrFallback(chatId, imageId, text, replyMarkup);

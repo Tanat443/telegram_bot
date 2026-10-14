@@ -582,7 +582,9 @@ function eventTitle(type) {
     telegram_subscription_checked: "Проверка подписки в Telegram",
     telegram_welcome_image_failed: "Картинка приветствия не отправилась",
     telegram_welcome_video_failed: "Кружок Telegram не отправился",
-    telegram_photo_failed: "Фото Telegram не отправилось"
+    telegram_photo_failed: "Фото Telegram не отправилось",
+    telegram_photo_sent: "Фото Telegram отправлено",
+    telegram_subscribed_response_started: "Ответ после подписки начат"
   };
   return titles[type] || type;
 }
