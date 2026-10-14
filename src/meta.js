@@ -1,10 +1,11 @@
 import { hasInstagramRecipient, markEventOnce, markInstagramRecipientOnce, recordEvent } from "./db.js";
 
 export class MetaClient {
-  constructor({ accessToken, apiVersion, graphBaseUrl, configProvider, telegramBot }) {
+  constructor({ accessToken, apiVersion, graphBaseUrl, publicBaseUrl, configProvider, telegramBot }) {
     this.accessToken = accessToken;
     this.apiVersion = apiVersion || "v24.0";
     this.graphBaseUrl = (graphBaseUrl || "https://graph.instagram.com").replace(/\/$/, "");
+    this.publicBaseUrl = (publicBaseUrl || "").replace(/\/$/, "");
     this.configProvider = configProvider;
     this.telegramBot = telegramBot;
   }
@@ -133,23 +134,17 @@ export class MetaClient {
 
   async privateReplyToComment(commentId, config) {
     const url = this.graphUrl(`/me/messages`);
+    const withImage = this.instagramMessagePayload(config);
+    const sent = await this.postGraph(url, {
+      recipient: { comment_id: commentId },
+      message: withImage
+    }, "private reply");
+    if (sent || !config.instagram.directMedia?.imageId) return sent;
+
     return this.postGraph(url, {
       recipient: { comment_id: commentId },
-      message: {
-        attachment: {
-          type: "template",
-          payload: {
-            template_type: "button",
-            text: config.instagram.directMessage.text,
-            buttons: [{
-              type: "web_url",
-              title: config.instagram.directMessage.buttonText,
-              url: this.telegramBot.getStartUrl(config.telegram.startPayload)
-            }]
-          }
-        }
-      }
-    }, "private reply");
+      message: this.instagramButtonMessage(config)
+    }, "private reply fallback");
   }
 
   async publicReplyToComment(commentId, message) {
@@ -159,23 +154,58 @@ export class MetaClient {
 
   async sendDirectMessage(recipientId, config) {
     const url = this.graphUrl(`/me/messages`);
+    const sent = await this.postGraph(url, {
+      recipient: { id: recipientId },
+      message: this.instagramMessagePayload(config)
+    }, "direct message");
+    if (sent || !config.instagram.directMedia?.imageId) return sent;
+
     return this.postGraph(url, {
       recipient: { id: recipientId },
-      message: {
+      message: this.instagramButtonMessage(config)
+    }, "direct message fallback");
+  }
+
+  instagramMessagePayload(config) {
+    const imageId = config.instagram.directMedia?.imageId;
+    if (imageId && this.publicBaseUrl) {
+      return {
         attachment: {
           type: "template",
           payload: {
-            template_type: "button",
-            text: config.instagram.directMessage.text,
-            buttons: [{
-              type: "web_url",
-              title: config.instagram.directMessage.buttonText,
-              url: this.telegramBot.getStartUrl(config.telegram.startPayload)
+            template_type: "generic",
+            elements: [{
+              title: truncateForMeta(config.instagram.directMessage.text, 80),
+              image_url: `${this.publicBaseUrl}/media/${imageId}`,
+              buttons: [{
+                type: "web_url",
+                title: config.instagram.directMessage.buttonText,
+                url: this.telegramBot.getStartUrl(config.telegram.startPayload)
+              }]
             }]
           }
         }
+      };
+    }
+
+    return this.instagramButtonMessage(config);
+  }
+
+  instagramButtonMessage(config) {
+    return {
+      attachment: {
+        type: "template",
+        payload: {
+          template_type: "button",
+          text: config.instagram.directMessage.text,
+          buttons: [{
+            type: "web_url",
+            title: config.instagram.directMessage.buttonText,
+            url: this.telegramBot.getStartUrl(config.telegram.startPayload)
+          }]
+        }
       }
-    }, "direct message");
+    };
   }
 
   graphUrl(path) {
@@ -251,4 +281,9 @@ function summarizeWebhook(body) {
 
 function getCommentActorId(value) {
   return value.from?.id || value.user?.id || value.user_id || value.sender_id || "";
+}
+
+function truncateForMeta(text, maxLength) {
+  const value = String(text || "");
+  return value.length > maxLength ? `${value.slice(0, maxLength - 3)}...` : value;
 }

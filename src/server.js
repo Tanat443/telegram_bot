@@ -31,6 +31,7 @@ const meta = new MetaClient({
   accessToken: getEnv("META_ACCESS_TOKEN"),
   apiVersion: getEnv("META_API_VERSION", "v24.0"),
   graphBaseUrl: getEnv("META_GRAPH_BASE_URL", "https://graph.instagram.com"),
+  publicBaseUrl: normalizeUrl(getEnv("PUBLIC_BASE_URL")),
   configProvider: readConfig,
   telegramBot: telegram
 });
@@ -219,6 +220,7 @@ async function handleAdmin(req, res) {
     config.instagram.publicCommentReply = form.publicCommentReply;
     config.instagram.directMessage.text = form.directText;
     config.instagram.directMessage.buttonText = form.directButtonText;
+    config.instagram.directMedia = config.instagram.directMedia || {};
     config.telegramTexts.welcome = form.tgWelcome;
     config.telegramTexts.notSubscribed = form.tgNotSubscribed;
     config.telegramTexts.subscribed = form.tgSubscribed;
@@ -229,23 +231,39 @@ async function handleAdmin(req, res) {
 
     if (form.removeWelcomeImage === "on") {
       config.telegramMedia.welcomeImageId = "";
+      config.telegramMedia.welcomePhoto1Id = "";
     }
+    if (form.removeDirectImage === "on") config.instagram.directMedia.imageId = "";
+    if (form.removeWelcomeCircleVideo === "on") config.telegramMedia.welcomeCircleVideoId = "";
+    if (form.removeWelcomePhoto2 === "on") config.telegramMedia.welcomePhoto2Id = "";
+    if (form.removeSubscribedPhoto === "on") config.telegramMedia.subscribedPhotoId = "";
 
-    if (files.welcomeImage?.buffer?.length) {
-      if (!files.welcomeImage.contentType?.startsWith("image/")) {
-        return sendHtml(res, renderMessage("Можно загрузить только изображение", "/admin"), 400);
+    try {
+      if (files.welcomeImage?.buffer?.length) {
+        const imageId = await saveUploadedMedia(files.welcomeImage, "telegram_welcome_photo_1", "image/");
+        if (imageId) {
+          config.telegramMedia.welcomeImageId = imageId;
+          config.telegramMedia.welcomePhoto1Id = imageId;
+        }
       }
-      if (files.welcomeImage.buffer.length > MAX_IMAGE_UPLOAD_BYTES) {
-        return sendHtml(res, renderMessage("Картинка слишком большая. Максимум 1.5 MB", "/admin"), 400);
+      if (files.directImage?.buffer?.length) {
+        const imageId = await saveUploadedMedia(files.directImage, "instagram_direct_image", "image/");
+        if (imageId) config.instagram.directMedia.imageId = imageId;
       }
-
-      const imageId = await saveMediaFile({
-        buffer: files.welcomeImage.buffer,
-        filename: files.welcomeImage.filename,
-        contentType: files.welcomeImage.contentType,
-        metadata: { purpose: "telegram_welcome" }
-      });
-      if (imageId) config.telegramMedia.welcomeImageId = imageId;
+      if (files.welcomeCircleVideo?.buffer?.length) {
+        const videoId = await saveUploadedMedia(files.welcomeCircleVideo, "telegram_welcome_circle_video", "video/");
+        if (videoId) config.telegramMedia.welcomeCircleVideoId = videoId;
+      }
+      if (files.welcomePhoto2?.buffer?.length) {
+        const imageId = await saveUploadedMedia(files.welcomePhoto2, "telegram_welcome_photo_2", "image/");
+        if (imageId) config.telegramMedia.welcomePhoto2Id = imageId;
+      }
+      if (files.subscribedPhoto?.buffer?.length) {
+        const imageId = await saveUploadedMedia(files.subscribedPhoto, "telegram_subscribed_photo", "image/");
+        if (imageId) config.telegramMedia.subscribedPhotoId = imageId;
+      }
+    } catch (error) {
+      return sendHtml(res, renderMessage(error.message, "/admin"), 400);
     }
 
     await writeConfig(config);
@@ -253,6 +271,22 @@ async function handleAdmin(req, res) {
   }
 
   return sendJson(res, 405, { error: "Method not allowed" });
+}
+
+async function saveUploadedMedia(file, purpose, expectedPrefix) {
+  if (!file.contentType?.startsWith(expectedPrefix)) {
+    throw new Error(expectedPrefix === "image/" ? "Можно загрузить только изображение" : "Можно загрузить только видео");
+  }
+  if (file.buffer.length > MAX_IMAGE_UPLOAD_BYTES) {
+    throw new Error("Файл слишком большой. Максимум 1.5 MB");
+  }
+
+  return saveMediaFile({
+    buffer: file.buffer,
+    filename: file.filename,
+    contentType: file.contentType,
+    metadata: { purpose }
+  });
 }
 
 async function handleMedia(url, res) {
@@ -503,7 +537,10 @@ function eventTitle(type) {
     meta_api_skipped: "Meta-запрос пропущен",
     telegram_update_received: "Событие от Telegram получено",
     telegram_started: "Пользователь открыл Telegram-бота",
-    telegram_subscription_checked: "Проверка подписки в Telegram"
+    telegram_subscription_checked: "Проверка подписки в Telegram",
+    telegram_welcome_image_failed: "Картинка приветствия не отправилась",
+    telegram_welcome_video_failed: "Кружок Telegram не отправился",
+    telegram_photo_failed: "Фото Telegram не отправилось"
   };
   return titles[type] || type;
 }
@@ -530,10 +567,22 @@ function formatDate(value) {
   });
 }
 
+function mediaPreview(url, alt) {
+  return `<img src="${esc(url)}" alt="${esc(alt)}" style="width:100%;max-height:180px;object-fit:cover;border-radius:8px;border:1px solid rgba(255,255,255,.7)">`;
+}
+
+function videoPreview(url) {
+  return `<video src="${esc(url)}" controls muted style="width:100%;max-height:180px;border-radius:8px;border:1px solid rgba(255,255,255,.7)"></video>`;
+}
+
 function renderAdmin(config) {
   const keywords = Array.isArray(config.instagram.keywords) ? config.instagram.keywords.join(", ") : "";
-  const welcomeImageId = config.telegramMedia?.welcomeImageId || "";
-  const welcomeImageUrl = welcomeImageId ? `/media/${welcomeImageId}` : "";
+  const directImageUrl = config.instagram.directMedia?.imageId ? `/media/${config.instagram.directMedia.imageId}` : "";
+  const welcomePhoto1Id = config.telegramMedia?.welcomePhoto1Id || config.telegramMedia?.welcomeImageId || "";
+  const welcomePhoto1Url = welcomePhoto1Id ? `/media/${welcomePhoto1Id}` : "";
+  const welcomeCircleVideoUrl = config.telegramMedia?.welcomeCircleVideoId ? `/media/${config.telegramMedia.welcomeCircleVideoId}` : "";
+  const welcomePhoto2Url = config.telegramMedia?.welcomePhoto2Id ? `/media/${config.telegramMedia.welcomePhoto2Id}` : "";
+  const subscribedPhotoUrl = config.telegramMedia?.subscribedPhotoId ? `/media/${config.telegramMedia.subscribedPhotoId}` : "";
   return `<!doctype html>
 <html lang="ru">
 <head>
@@ -738,6 +787,20 @@ function renderAdmin(config) {
           <small>Лучше держать выключенным, чтобы не плодить ответы.</small>
         </div>
       </div>
+      <div class="row" style="margin-top:14px">
+        <div class="field">
+          <label>Фото приветствия в Direct</label>
+          <input class="media-input" name="directImage" type="file" accept="image/*">
+          <small>Для Instagram Direct. Если Meta не примет карточку с фото, бот попробует обычный ответ.</small>
+        </div>
+        <div class="field">
+          <label>Текущее фото Direct</label>
+          ${directImageUrl ? mediaPreview(directImageUrl, "Direct image") : `<div class="hint">Фото не загружено.</div>`}
+        </div>
+        <div class="field">
+          <label class="toggle" style="margin-top:22px">Удалить фото Direct <input name="removeDirectImage" type="checkbox"></label>
+        </div>
+      </div>
     </section>
 
     <section class="section">
@@ -759,16 +822,58 @@ function renderAdmin(config) {
       </div>
       <div class="row" style="margin-top:14px">
         <div class="field">
-          <label>Картинка приветствия</label>
-          <input id="welcomeImageInput" name="welcomeImage" type="file" accept="image/*">
+          <label>1. Фото приветствия</label>
+          <input class="media-input" name="welcomeImage" type="file" accept="image/*">
           <small>Хранится в MongoDB GridFS. Перед сохранением браузер попробует сжать до 1.5 MB.</small>
         </div>
         <div class="field">
-          <label>Текущая картинка</label>
-          ${welcomeImageUrl ? `<img src="${esc(welcomeImageUrl)}" alt="Welcome image" style="width:100%;max-height:180px;object-fit:cover;border-radius:8px;border:1px solid rgba(255,255,255,.7)">` : `<div class="hint">Картинка не загружена.</div>`}
+          <label>Текущее фото 1</label>
+          ${welcomePhoto1Url ? mediaPreview(welcomePhoto1Url, "Welcome image") : `<div class="hint">Фото не загружено.</div>`}
         </div>
         <div class="field">
-          <label class="toggle" style="margin-top:22px">Удалить картинку <input name="removeWelcomeImage" type="checkbox"></label>
+          <label class="toggle" style="margin-top:22px">Удалить фото 1 <input name="removeWelcomeImage" type="checkbox"></label>
+        </div>
+      </div>
+      <div class="row" style="margin-top:14px">
+        <div class="field">
+          <label>2. Кружок Telegram</label>
+          <input name="welcomeCircleVideo" type="file" accept="video/*">
+          <small>Лучше короткий квадратный MP4 до 1.5 MB. Отправляется через sendVideoNote.</small>
+        </div>
+        <div class="field">
+          <label>Текущий кружок</label>
+          ${welcomeCircleVideoUrl ? videoPreview(welcomeCircleVideoUrl) : `<div class="hint">Видео не загружено.</div>`}
+        </div>
+        <div class="field">
+          <label class="toggle" style="margin-top:22px">Удалить кружок <input name="removeWelcomeCircleVideo" type="checkbox"></label>
+        </div>
+      </div>
+      <div class="row" style="margin-top:14px">
+        <div class="field">
+          <label>3. Фото перед проверкой</label>
+          <input class="media-input" name="welcomePhoto2" type="file" accept="image/*">
+          <small>Это сообщение идет с кнопками “Арнаға жазылу” и “Жазылдым”.</small>
+        </div>
+        <div class="field">
+          <label>Текущее фото 2</label>
+          ${welcomePhoto2Url ? mediaPreview(welcomePhoto2Url, "Second welcome image") : `<div class="hint">Фото не загружено.</div>`}
+        </div>
+        <div class="field">
+          <label class="toggle" style="margin-top:22px">Удалить фото 2 <input name="removeWelcomePhoto2" type="checkbox"></label>
+        </div>
+      </div>
+      <div class="row" style="margin-top:14px">
+        <div class="field">
+          <label>Фото после подписки</label>
+          <input class="media-input" name="subscribedPhoto" type="file" accept="image/*">
+          <small>Если пользователь подписан, отправится фото + текст + кнопка лендинга.</small>
+        </div>
+        <div class="field">
+          <label>Текущее фото после подписки</label>
+          ${subscribedPhotoUrl ? mediaPreview(subscribedPhotoUrl, "Subscribed image") : `<div class="hint">Фото не загружено.</div>`}
+        </div>
+        <div class="field">
+          <label class="toggle" style="margin-top:22px">Удалить фото после подписки <input name="removeSubscribedPhoto" type="checkbox"></label>
         </div>
       </div>
       <div class="row" style="margin-top:14px">
@@ -795,7 +900,7 @@ function renderAdmin(config) {
 </main>
 <script>
   const passwordInput = document.getElementById("adminPassword");
-  const welcomeImageInput = document.getElementById("welcomeImageInput");
+  const imageInputs = Array.from(document.querySelectorAll(".media-input"));
   const authLinks = Array.from(document.querySelectorAll("[data-auth-link]"));
   function syncAuthLinks() {
     const value = encodeURIComponent(passwordInput.value || "");
@@ -804,20 +909,22 @@ function renderAdmin(config) {
   passwordInput.addEventListener("input", syncAuthLinks);
   syncAuthLinks();
 
-  welcomeImageInput.addEventListener("change", async () => {
-    const file = welcomeImageInput.files && welcomeImageInput.files[0];
-    if (!file || !file.type.startsWith("image/")) return;
-    if (file.size <= ${Math.floor(MAX_IMAGE_UPLOAD_BYTES)}) return;
+  for (const input of imageInputs) {
+    input.addEventListener("change", async () => {
+      const file = input.files && input.files[0];
+      if (!file || !file.type.startsWith("image/")) return;
+      if (file.size <= ${Math.floor(MAX_IMAGE_UPLOAD_BYTES)}) return;
 
-    try {
-      const compressed = await compressImage(file, ${Math.floor(MAX_IMAGE_UPLOAD_BYTES)});
-      const dataTransfer = new DataTransfer();
-      dataTransfer.items.add(compressed);
-      welcomeImageInput.files = dataTransfer.files;
-    } catch (error) {
-      alert("Не получилось сжать картинку. Выберите файл меньше 1.5 MB.");
-    }
-  });
+      try {
+        const compressed = await compressImage(file, ${Math.floor(MAX_IMAGE_UPLOAD_BYTES)});
+        const dataTransfer = new DataTransfer();
+        dataTransfer.items.add(compressed);
+        input.files = dataTransfer.files;
+      } catch (error) {
+        alert("Не получилось сжать картинку. Выберите файл меньше 1.5 MB.");
+      }
+    });
+  }
 
   async function compressImage(file, maxBytes) {
     const bitmap = await createImageBitmap(file);

@@ -5,7 +5,11 @@
     "startPayload": "ig"
   },
   "telegramMedia": {
-    "welcomeImageId": ""
+    "welcomeImageId": "",
+    "welcomePhoto1Id": "",
+    "welcomeCircleVideoId": "",
+    "welcomePhoto2Id": "",
+    "subscribedPhotoId": ""
   },
   "instagram": {
     "enabledTriggers": {
@@ -19,14 +23,17 @@
     "directMessage": {
       "text": "Салем! Нажмите кнопку ниже, чтобы получить доступ. В Telegram бот проверит подписку и откроет ссылку.",
       "buttonText": "Получить доступ"
+    },
+    "directMedia": {
+      "imageId": ""
     }
   },
   "telegramTexts": {
     "welcome": "Салем! Сейчас проверю подписку на канал.",
     "notSubscribed": "Чтобы получить доступ, подпишитесь на канал, затем нажмите кнопку проверки.",
     "subscribed": "Готово! Вы подписаны. Вот ссылка:",
-    "checkButton": "Проверить подписку",
-    "channelButton": "Подписаться на канал",
+    "checkButton": "Жазылдым",
+    "channelButton": "Арнаға жазылу",
     "landingButton": "Открыть лендинг"
   }
 }

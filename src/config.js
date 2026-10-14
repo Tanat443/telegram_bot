@@ -79,6 +79,21 @@ export function normalizeUrl(url) {
 }
 
 function applyEnvOverrides(config) {
+  config.instagram = config.instagram || {};
+  config.instagram.directMedia = config.instagram.directMedia || { imageId: "" };
+  config.telegramMedia = config.telegramMedia || {};
+  config.telegramMedia.welcomePhoto1Id = config.telegramMedia.welcomePhoto1Id || config.telegramMedia.welcomeImageId || "";
+  config.telegramMedia.welcomeCircleVideoId = config.telegramMedia.welcomeCircleVideoId || "";
+  config.telegramMedia.welcomePhoto2Id = config.telegramMedia.welcomePhoto2Id || "";
+  config.telegramMedia.subscribedPhotoId = config.telegramMedia.subscribedPhotoId || "";
+  config.telegramTexts = config.telegramTexts || {};
+  if (!config.telegramTexts.channelButton || config.telegramTexts.channelButton === "Подписаться на канал") {
+    config.telegramTexts.channelButton = "Арнаға жазылу";
+  }
+  if (!config.telegramTexts.checkButton || config.telegramTexts.checkButton === "Проверить подписку") {
+    config.telegramTexts.checkButton = "Жазылдым";
+  }
+
   if (process.env.TELEGRAM_CHANNEL_USERNAME) {
     config.telegram.channelUsername = process.env.TELEGRAM_CHANNEL_USERNAME;
   }

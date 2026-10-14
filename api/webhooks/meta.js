@@ -34,6 +34,7 @@ export default async function handler(req, res) {
       accessToken: process.env.META_ACCESS_TOKEN || "",
       apiVersion: process.env.META_API_VERSION || "v24.0",
       graphBaseUrl: process.env.META_GRAPH_BASE_URL || "https://graph.instagram.com",
+      publicBaseUrl: process.env.PUBLIC_BASE_URL || "",
       configProvider: readConfig,
       telegramBot: {
         getStartUrl(payload = "ig") {

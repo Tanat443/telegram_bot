@@ -103,22 +103,73 @@ export class TelegramBot {
   }
 
   async sendWelcome(chatId, config) {
-    const imageId = config.telegramMedia?.welcomeImageId;
-    if (imageId && process.env.PUBLIC_BASE_URL) {
-      await this.api("sendPhoto", {
+    const media = config.telegramMedia || {};
+    const photo1Id = media.welcomePhoto1Id || media.welcomeImageId;
+    const circleVideoId = media.welcomeCircleVideoId;
+    const photo2Id = media.welcomePhoto2Id;
+    let sentAnyMedia = false;
+
+    if (photo1Id && process.env.PUBLIC_BASE_URL) {
+      sentAnyMedia = await this.sendPhotoOrFallback(chatId, photo1Id, config.telegramTexts.welcome);
+    }
+
+    if (!sentAnyMedia) {
+      await this.api("sendMessage", {
         chat_id: chatId,
-        photo: `${normalizeUrl(process.env.PUBLIC_BASE_URL).replace(/\/$/, "")}/media/${imageId}`,
-        caption: truncateCaption(config.telegramTexts.welcome),
-        reply_markup: this.subscriptionKeyboard(config)
+        text: config.telegramTexts.welcome
       });
-      return;
+    }
+
+    if (circleVideoId && process.env.PUBLIC_BASE_URL) {
+      try {
+        await this.api("sendVideoNote", {
+          chat_id: chatId,
+          video_note: this.mediaUrl(circleVideoId)
+        });
+      } catch (error) {
+        console.error(`Telegram welcome video note failed: ${error.message}`);
+        await recordEvent("telegram_welcome_video_failed", {
+          chatId,
+          videoId: circleVideoId,
+          error: error.message
+        });
+      }
+    }
+
+    if (photo2Id && process.env.PUBLIC_BASE_URL) {
+      const sentPhoto2 = await this.sendPhotoOrFallback(chatId, photo2Id, config.telegramTexts.notSubscribed, this.subscriptionKeyboard(config));
+      if (sentPhoto2) return;
     }
 
     await this.api("sendMessage", {
       chat_id: chatId,
-      text: config.telegramTexts.welcome,
+      text: config.telegramTexts.notSubscribed,
       reply_markup: this.subscriptionKeyboard(config)
     });
+  }
+
+  async sendPhotoOrFallback(chatId, imageId, caption, replyMarkup) {
+    try {
+      await this.api("sendPhoto", {
+        chat_id: chatId,
+        photo: this.mediaUrl(imageId),
+        caption: truncateCaption(caption),
+        ...(replyMarkup ? { reply_markup: replyMarkup } : {})
+      });
+      return true;
+    } catch (error) {
+      console.error(`Telegram photo failed: ${error.message}`);
+      await recordEvent("telegram_photo_failed", {
+        chatId,
+        imageId,
+        error: error.message
+      });
+      return false;
+    }
+  }
+
+  mediaUrl(mediaId) {
+    return `${normalizeUrl(process.env.PUBLIC_BASE_URL).replace(/\/$/, "")}/media/${mediaId}`;
   }
 
   async handleCallback(callback) {
@@ -150,14 +201,27 @@ export class TelegramBot {
       return;
     }
 
+    await this.sendSubscribed(callback.message.chat.id, config);
+  }
+
+  async sendSubscribed(chatId, config) {
+    const replyMarkup = {
+      inline_keyboard: [[
+        { text: config.telegramTexts.landingButton, url: normalizeUrl(config.landingUrl) }
+      ]]
+    };
+    const text = `${config.telegramTexts.subscribed}\n${normalizeUrl(config.landingUrl)}`;
+    const imageId = config.telegramMedia?.subscribedPhotoId;
+
+    if (imageId && process.env.PUBLIC_BASE_URL) {
+      const sent = await this.sendPhotoOrFallback(chatId, imageId, text, replyMarkup);
+      if (sent) return;
+    }
+
     await this.api("sendMessage", {
-      chat_id: callback.message.chat.id,
-      text: `${config.telegramTexts.subscribed}\n${normalizeUrl(config.landingUrl)}`,
-      reply_markup: {
-        inline_keyboard: [[
-          { text: config.telegramTexts.landingButton, url: normalizeUrl(config.landingUrl) }
-        ]]
-      }
+      chat_id: chatId,
+      text,
+      reply_markup: replyMarkup
     });
   }
 
