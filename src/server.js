@@ -294,9 +294,27 @@ async function handleMedia(url, res) {
   const media = await getMediaFile(id);
   if (!media) return sendJson(res, 404, { error: "Media not found" });
 
+  if (url.searchParams.get("info") === "1") {
+    return sendJson(res, 200, {
+      ok: true,
+      id,
+      filename: media.file.filename,
+      contentType: media.file.contentType,
+      length: media.file.length,
+      uploadDate: media.file.uploadDate,
+      metadata: media.file.metadata || {}
+    });
+  }
+
   res.writeHead(200, {
     "content-type": media.file.contentType || "application/octet-stream",
+    "content-length": media.file.length,
     "cache-control": "public, max-age=31536000, immutable"
+  });
+  media.stream.on("error", (error) => {
+    console.error(`Media stream failed: ${error.message}`);
+    if (!res.headersSent) sendJson(res, 500, { error: "Media stream failed" });
+    else res.destroy(error);
   });
   media.stream.pipe(res);
 }

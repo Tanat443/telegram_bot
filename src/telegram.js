@@ -150,18 +150,20 @@ export class TelegramBot {
 
   async sendPhotoOrFallback(chatId, imageId, caption, replyMarkup) {
     try {
+      const photoUrl = this.mediaUrl(imageId);
       await this.api("sendPhoto", {
         chat_id: chatId,
-        photo: this.mediaUrl(imageId),
+        photo: photoUrl,
         caption: truncateCaption(caption),
         ...(replyMarkup ? { reply_markup: replyMarkup } : {})
       });
       return true;
     } catch (error) {
-      console.error(`Telegram photo failed: ${error.message}`);
+      console.error(`Telegram photo failed: ${error.message}; url=${this.mediaUrl(imageId)}`);
       await recordEvent("telegram_photo_failed", {
         chatId,
         imageId,
+        url: this.mediaUrl(imageId),
         error: error.message
       });
       return false;
@@ -169,7 +171,7 @@ export class TelegramBot {
   }
 
   mediaUrl(mediaId) {
-    return `${normalizeUrl(process.env.PUBLIC_BASE_URL).replace(/\/$/, "")}/media/${mediaId}`;
+    return `${normalizeUrl(process.env.PUBLIC_BASE_URL).replace(/\/$/, "")}/media/${encodeURIComponent(mediaId)}`;
   }
 
   async handleCallback(callback) {
