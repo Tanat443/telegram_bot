@@ -415,11 +415,44 @@ export async function listMediaFiles(limit = 60) {
   return files.map((file) => ({
     id: String(file._id),
     filename: file.filename || "media",
-    contentType: file.contentType || file.metadata?.contentType || "",
+    contentType: mediaFileContentType(file),
     length: file.length || 0,
     uploadDate: file.uploadDate,
     metadata: file.metadata || {}
   }));
+}
+
+function mediaFileContentType(file) {
+  const declaredType = String(
+    file.contentType
+      || file.metadata?.contentType
+      || file.metadata?.originalContentType
+      || ""
+  ).trim().toLowerCase();
+
+  if (declaredType && declaredType !== "application/octet-stream") {
+    return declaredType;
+  }
+
+  const extension = String(file.filename || "")
+    .toLowerCase()
+    .split(".")
+    .pop();
+  const typesByExtension = {
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    png: "image/png",
+    webp: "image/webp",
+    gif: "image/gif",
+    heic: "image/heic",
+    heif: "image/heif",
+    mp4: "video/mp4",
+    m4v: "video/x-m4v",
+    mov: "video/quicktime",
+    webm: "video/webm"
+  };
+
+  return typesByExtension[extension] || declaredType;
 }
 
 export async function getMediaFile(id) {

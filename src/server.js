@@ -685,7 +685,18 @@ async function handleMedia(url, res) {
 }
 
 function mediaContentType(file) {
-  return file.contentType || file.metadata?.contentType || inferContentType(file.filename) || "application/octet-stream";
+  const declaredType = String(
+    file.contentType
+      || file.metadata?.contentType
+      || file.metadata?.originalContentType
+      || ""
+  ).trim().toLowerCase();
+
+  if (declaredType && declaredType !== "application/octet-stream") {
+    return declaredType;
+  }
+
+  return inferContentType(file.filename) || declaredType || "application/octet-stream";
 }
 
 function inferContentType(filename = "") {
@@ -696,7 +707,10 @@ function inferContentType(filename = "") {
     png: "image/png",
     webp: "image/webp",
     gif: "image/gif",
+    heic: "image/heic",
+    heif: "image/heif",
     mp4: "video/mp4",
+    m4v: "video/x-m4v",
     mov: "video/quicktime",
     webm: "video/webm"
   };
