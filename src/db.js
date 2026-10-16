@@ -224,45 +224,140 @@ export async function getTelegramUser(userId) {
   return db.collection("telegram_users").findOne({ _id: String(userId) });
 }
 
-export async function getStats() {
+export async function getStats(filters = {}) {
   const db = await getDb();
   if (!db) return null;
 
   await ensureIndexes(db);
+  const query = statsQuery(filters);
   const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
-  const [totalEvents, events24h, users, instagramRecipients, byType, recentEvents] = await Promise.all([
-    db.collection("events").countDocuments(),
-    db.collection("events").countDocuments({ createdAt: { $gte: since24h } }),
-    db.collection("telegram_users").countDocuments(),
-    db.collection("instagram_recipients").countDocuments(),
+  const events24hQuery = mergeCreatedAt(query, { $gte: since24h });
+  const [totalEvents, events24h, users, instagramRecipients, byType, byCampaign, recentEvents, availableEventTypes] = await Promise.all([
+    db.collection("events").countDocuments(query),
+    db.collection("events").countDocuments(events24hQuery),
+    db.collection("events").distinct("telegramId", query),
+    db.collection("instagram_recipients").countDocuments(filters.campaignId ? { campaignId: filters.campaignId } : {}),
     db.collection("events").aggregate([
+      { $match: query },
       { $group: { _id: "$type", count: { $sum: 1 } } },
       { $sort: { count: -1 } }
     ]).toArray(),
+    db.collection("events").aggregate([
+      { $match: query },
+      {
+        $group: {
+          _id: { $ifNull: ["$campaignId", "unattributed"] },
+          campaignName: { $last: { $ifNull: ["$campaignName", "Без кампании"] } },
+          totalEvents: { $sum: 1 },
+          comments: { $sum: { $cond: [{ $eq: ["$type", "instagram_comment_received"] }, 1, 0] } },
+          repliesSent: { $sum: { $cond: [{ $eq: ["$type", "meta_api_sent"] }, 1, 0] } },
+          metaErrors: { $sum: { $cond: [{ $eq: ["$type", "meta_api_failed"] }, 1, 0] } },
+          telegramStarts: { $sum: { $cond: [{ $eq: ["$type", "telegram_started"] }, 1, 0] } },
+          subscribed: {
+            $sum: { $cond: [{ $and: [{ $eq: ["$type", "telegram_subscription_checked"] }, { $eq: ["$subscribed", true] }] }, 1, 0] }
+          },
+          notSubscribed: {
+            $sum: { $cond: [{ $and: [{ $eq: ["$type", "telegram_subscription_checked"] }, { $eq: ["$subscribed", false] }] }, 1, 0] }
+          },
+          landingClicks: { $sum: { $cond: [{ $eq: ["$type", "landing_clicked"] }, 1, 0] } }
+        }
+      },
+      { $sort: { comments: -1, telegramStarts: -1, totalEvents: -1 } }
+    ]).toArray(),
     db.collection("events")
-      .find({}, { projection: { type: 1, createdAt: 1, label: 1, status: 1, subscribed: 1, commentId: 1, telegramId: 1, instagramUserId: 1, campaignId: 1, campaignName: 1 } })
+      .find(query, { projection: { type: 1, createdAt: 1, label: 1, status: 1, subscribed: 1, commentId: 1, telegramId: 1, instagramUserId: 1, campaignId: 1, campaignName: 1, mediaId: 1 } })
       .sort({ createdAt: -1 })
-      .limit(12)
-      .toArray()
+      .limit(30)
+      .toArray(),
+    db.collection("events").distinct("type")
   ]);
+
+  const funnel = metricsFromTypeCounts(byType);
+  const subscriptionCounts = filters.eventType && filters.eventType !== "telegram_subscription_checked"
+    ? []
+    : await db.collection("events").aggregate([
+      { $match: { ...query, type: "telegram_subscription_checked" } },
+      { $group: { _id: "$subscribed", count: { $sum: 1 } } }
+    ]).toArray();
 
   return {
     totalEvents,
     events24h,
-    users,
+    users: users.filter((value) => value !== null && value !== undefined && value !== "").length,
     instagramRecipients,
     byType: byType.map((item) => ({ type: item._id, count: item.count })),
-    funnel: {
-      comments: countType(byType, "instagram_comment_received"),
-      repliesSent: countType(byType, "meta_api_sent"),
-      telegramStarts: countType(byType, "telegram_started"),
-      subscriptionChecks: countType(byType, "telegram_subscription_checked")
+    metrics: {
+      ...funnel,
+      subscribed: countType(subscriptionCounts, true),
+      notSubscribed: countType(subscriptionCounts, false)
     },
+    funnel,
+    byCampaign: byCampaign.map((item) => ({
+      campaignId: item._id,
+      campaignName: item.campaignName,
+      totalEvents: item.totalEvents,
+      comments: item.comments,
+      repliesSent: item.repliesSent,
+      metaErrors: item.metaErrors,
+      telegramStarts: item.telegramStarts,
+      subscribed: item.subscribed,
+      notSubscribed: item.notSubscribed,
+      landingClicks: item.landingClicks
+    })),
+    availableEventTypes: availableEventTypes.filter(Boolean).sort(),
     recentEvents: recentEvents.map((event) => ({
       ...event,
       _id: String(event._id),
       createdAt: event.createdAt?.toISOString?.() || event.createdAt
     }))
+  };
+}
+
+function statsQuery(filters) {
+  const query = {};
+  if (filters.campaignId) query.campaignId = String(filters.campaignId);
+  if (filters.mediaId) query.mediaId = String(filters.mediaId);
+  if (filters.eventType) query.type = String(filters.eventType);
+
+  const createdAt = {};
+  const dateFrom = validDate(filters.dateFrom);
+  const dateTo = validDate(filters.dateTo);
+  if (dateFrom) createdAt.$gte = dateFrom;
+  if (dateTo) createdAt.$lt = dateTo;
+  if (Object.keys(createdAt).length) query.createdAt = createdAt;
+  return query;
+}
+
+function validDate(value) {
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function mergeCreatedAt(query, range) {
+  const existing = query.createdAt || {};
+  const existingFrom = validDate(existing.$gte);
+  const rangeFrom = validDate(range.$gte);
+  return {
+    ...query,
+    createdAt: {
+      ...existing,
+      ...range,
+      ...((existingFrom || rangeFrom) ? {
+        $gte: new Date(Math.max(existingFrom?.getTime() || 0, rangeFrom?.getTime() || 0))
+      } : {})
+    }
+  };
+}
+
+function metricsFromTypeCounts(byType) {
+  return {
+    comments: countType(byType, "instagram_comment_received"),
+    repliesSent: countType(byType, "meta_api_sent"),
+    metaErrors: countType(byType, "meta_api_failed"),
+    telegramStarts: countType(byType, "telegram_started"),
+    subscriptionChecks: countType(byType, "telegram_subscription_checked"),
+    landingClicks: countType(byType, "landing_clicked")
   };
 }
 
@@ -341,6 +436,8 @@ async function ensureIndexes(db) {
     db.collection("media.files").createIndex({ uploadDate: -1 }),
     db.collection("events").createIndex({ createdAt: -1 }),
     db.collection("events").createIndex({ type: 1, createdAt: -1 }),
+    db.collection("events").createIndex({ campaignId: 1, createdAt: -1 }),
+    db.collection("events").createIndex({ campaignId: 1, mediaId: 1, type: 1, createdAt: -1 }),
     db.collection("telegram_users").createIndex({ updatedAt: -1 })
   ]);
 

@@ -223,16 +223,17 @@ export class TelegramBot {
       return;
     }
 
-    await this.sendSubscribed(callback.message.chat.id, config);
+    await this.sendSubscribed(callback.message.chat.id, config, userId);
   }
 
-  async sendSubscribed(chatId, config) {
+  async sendSubscribed(chatId, config, telegramId) {
+    const landingUrl = this.trackingUrl(config, telegramId);
     const replyMarkup = {
       inline_keyboard: [[
-        { text: config.telegramTexts.landingButton, url: normalizeUrl(config.landingUrl) }
+        { text: config.telegramTexts.landingButton, url: landingUrl }
       ]]
     };
-    const text = `${config.telegramTexts.subscribed}\n${normalizeUrl(config.landingUrl)}`;
+    const text = `${config.telegramTexts.subscribed}\n${landingUrl}`;
     const imageId = config.telegramMedia?.subscribedPhotoId || "";
     console.log(`Telegram subscribed response: subscribedPhotoId=${imageId || "empty"}`);
     await recordEvent("telegram_subscribed_response_started", {
@@ -251,8 +252,16 @@ export class TelegramBot {
     await this.api("sendMessage", {
       chat_id: chatId,
       text,
+      link_preview_options: { is_disabled: true },
       reply_markup: replyMarkup
     });
+  }
+
+  trackingUrl(config, telegramId) {
+    const publicBaseUrl = normalizeUrl(process.env.PUBLIC_BASE_URL).replace(/\/$/, "");
+    if (!publicBaseUrl) return normalizeUrl(config.landingUrl);
+    const campaignId = config.campaign?.id || "default";
+    return `${publicBaseUrl}/r/${encodeURIComponent(campaignId)}?tg=${encodeURIComponent(telegramId || "")}`;
   }
 
   async isSubscribed(channelUsername, userId) {

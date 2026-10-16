@@ -1,9 +1,10 @@
 import http from "node:http";
 import crypto from "node:crypto";
 import Busboy from "busboy";
+import sharp from "sharp";
 import { URL } from "node:url";
-import { getEnv, loadDotEnv, normalizeUrl, readConfig, writeConfig } from "./config.js";
-import { getMediaFile, getStats, hasMongo, listInstagramMedia, listMediaFiles, saveMediaFile, upsertInstagramMedia } from "./db.js";
+import { getEnv, loadDotEnv, normalizeUrl, readCampaigns, readConfig, readConfigForCampaignId, writeConfig } from "./config.js";
+import { getMediaFile, getStats, hasMongo, listInstagramMedia, listMediaFiles, recordEvent, saveMediaFile, upsertInstagramMedia } from "./db.js";
 import { MetaClient } from "./meta.js";
 import { TelegramBot } from "./telegram.js";
 
@@ -15,7 +16,10 @@ const adminSessionSecret = getEnv("ADMIN_SESSION_SECRET", adminPassword);
 const verifyToken = getEnv("META_VERIFY_TOKEN", "verify-token");
 const telegramWebhookSecret = getEnv("TELEGRAM_WEBHOOK_SECRET");
 const telegramToken = getEnv("TELEGRAM_BOT_TOKEN");
-const MAX_IMAGE_UPLOAD_BYTES = 1.5 * 1024 * 1024;
+const MAX_IMAGE_UPLOAD_BYTES = 12 * 1024 * 1024;
+const MAX_VIDEO_UPLOAD_BYTES = 1.5 * 1024 * 1024;
+const TARGET_IMAGE_BYTES = 1.2 * 1024 * 1024;
+const MAX_IMAGE_SIDE = 1600;
 const MAX_ADMIN_UPLOAD_FIELDS = 10;
 
 const telegram = new TelegramBot({
@@ -79,6 +83,10 @@ const server = http.createServer(async (req, res) => {
           publicBaseUrl: getEnv("PUBLIC_BASE_URL") || ""
         }
       });
+    }
+
+    if (req.method === "GET" && url.pathname.startsWith("/r/")) {
+      return handleLandingRedirect(req, res, url);
     }
 
     if (url.pathname === "/admin/login") {
@@ -522,24 +530,103 @@ async function saveUploadedMedia(file, purpose, expectedPrefix) {
   if (!file.contentType?.startsWith(expectedPrefix)) {
     throw new Error(expectedPrefix === "image/" ? "Можно загрузить только изображение" : "Можно загрузить только видео");
   }
-  if (file.buffer.length > MAX_IMAGE_UPLOAD_BYTES) {
-    throw new Error("Файл слишком большой. Максимум 1.5 MB");
-  }
+
+  const media = expectedPrefix === "image/"
+    ? await normalizeImageUpload(file)
+    : normalizeVideoUpload(file);
 
   const mediaId = await saveMediaFile({
-    buffer: file.buffer,
-    filename: file.filename,
-    contentType: file.contentType,
-    metadata: { purpose }
+    buffer: media.buffer,
+    filename: media.filename,
+    contentType: media.contentType,
+    metadata: {
+      purpose,
+      ...media.metadata
+    }
   });
   if (!mediaId) {
     throw new Error("Файл не сохранился в MongoDB. Проверьте MONGODB_URI в Vercel.");
   }
 
-  console.log(`Media uploaded: purpose=${purpose}; id=${mediaId}; filename=${file.filename}; type=${file.contentType}; size=${file.buffer.length}`);
+  console.log(`Media uploaded: purpose=${purpose}; id=${mediaId}; filename=${media.filename}; type=${media.contentType}; size=${media.buffer.length}; original=${file.filename}:${file.contentType}:${file.buffer.length}`);
   return mediaId;
 }
 
+async function normalizeImageUpload(file) {
+  if (file.buffer.length > MAX_IMAGE_UPLOAD_BYTES) {
+    throw new Error(`Картинка слишком большая. Максимум ${formatBytes(MAX_IMAGE_UPLOAD_BYTES)}.`);
+  }
+
+  let pipeline = sharp(file.buffer, { failOn: "none" })
+    .rotate()
+    .resize({
+      width: MAX_IMAGE_SIDE,
+      height: MAX_IMAGE_SIDE,
+      fit: "inside",
+      withoutEnlargement: true
+    });
+
+  const inputMetadata = await pipeline.metadata();
+  const attempts = [82, 76, 70, 64, 58, 52];
+  let output = null;
+  let quality = attempts[attempts.length - 1];
+
+  for (const attempt of attempts) {
+    const buffer = await pipeline
+      .clone()
+      .jpeg({ quality: attempt, progressive: true, mozjpeg: true })
+      .toBuffer();
+    output = buffer;
+    quality = attempt;
+    if (buffer.length <= TARGET_IMAGE_BYTES) break;
+  }
+
+  const outputMetadata = await sharp(output).metadata();
+  const baseName = String(file.filename || "image").replace(/\.[^.]+$/, "");
+  return {
+    buffer: output,
+    filename: `${safeFilenameBase(baseName)}.jpg`,
+    contentType: "image/jpeg",
+    metadata: {
+      normalized: true,
+      originalFilename: file.filename || "",
+      originalContentType: file.contentType || "",
+      originalSize: file.buffer.length,
+      originalWidth: inputMetadata.width || null,
+      originalHeight: inputMetadata.height || null,
+      width: outputMetadata.width || null,
+      height: outputMetadata.height || null,
+      quality,
+      targetBytes: TARGET_IMAGE_BYTES
+    }
+  };
+}
+
+function normalizeVideoUpload(file) {
+  if (file.buffer.length > MAX_VIDEO_UPLOAD_BYTES) {
+    throw new Error(`Видео слишком большое. Максимум ${formatBytes(MAX_VIDEO_UPLOAD_BYTES)}.`);
+  }
+
+  return {
+    buffer: file.buffer,
+    filename: file.filename || "video",
+    contentType: file.contentType,
+    metadata: {
+      normalized: false,
+      originalFilename: file.filename || "",
+      originalContentType: file.contentType || "",
+      originalSize: file.buffer.length
+    }
+  };
+}
+
+function safeFilenameBase(value) {
+  return String(value || "image")
+    .trim()
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80) || "image";
+}
 async function handleMediaDebug(req, res) {
   if (!requireAdmin(req, res, "/admin/media-debug")) return;
 
@@ -612,7 +699,7 @@ function safeHeaderFilename(filename) {
 }
 
 async function handleStats(req, url, res) {
-  if (!requireAdmin(req, res, "/stats")) return;
+  if (!requireAdmin(req, res, `${url.pathname}${url.search}`)) return;
 
   if (!hasMongo()) {
     return sendJson(res, 200, {
@@ -621,12 +708,85 @@ async function handleStats(req, url, res) {
     });
   }
 
-  const stats = await getStats();
+  const filters = statsFilters(url.searchParams);
+  const [stats, config, media] = await Promise.all([
+    getStats(filters),
+    readConfig(),
+    listInstagramMedia(200)
+  ]);
+  const campaigns = await readCampaigns(config);
+  const mediaOptions = [...media];
+  const knownMediaIds = new Set(mediaOptions.map((item) => String(item.id)));
+  for (const campaign of campaigns) {
+    for (const mediaId of campaign.mediaIds || []) {
+      if (knownMediaIds.has(String(mediaId))) continue;
+      knownMediaIds.add(String(mediaId));
+      mediaOptions.push({ id: String(mediaId), mediaType: "Campaign media", caption: "" });
+    }
+  }
   if (url.searchParams.get("format") === "json") {
-    return sendJson(res, 200, { ok: true, stats });
+    return sendJson(res, 200, { ok: true, filters, stats });
   }
 
-  return sendHtml(res, renderStats(stats));
+  return sendHtml(res, renderStats(stats, filters, { campaigns, media: mediaOptions }));
+}
+
+async function handleLandingRedirect(req, res, url) {
+  const rawCampaignId = url.pathname.slice(3);
+  let campaignId;
+  try {
+    campaignId = decodeURIComponent(rawCampaignId);
+  } catch {
+    return sendJson(res, 400, { error: "Invalid campaign id" });
+  }
+  if (!campaignId || campaignId.includes("/")) return sendJson(res, 404, { error: "Campaign not found" });
+
+  const config = await readConfigForCampaignId(campaignId);
+  if (campaignId !== "default" && config.campaign?.id !== campaignId) {
+    return sendJson(res, 404, { error: "Campaign not found" });
+  }
+
+  const landingUrl = normalizeUrl(config.landingUrl);
+  if (!/^https?:\/\//i.test(landingUrl)) return sendJson(res, 404, { error: "Landing URL is not configured" });
+
+  const telegramId = String(url.searchParams.get("tg") || "").trim();
+  await recordEvent("landing_clicked", {
+    campaignId: config.campaign?.id || campaignId,
+    campaignName: config.campaign?.name || campaignId,
+    telegramId,
+    userAgent: String(req.headers["user-agent"] || "").slice(0, 500),
+    referer: String(req.headers.referer || "").slice(0, 1000)
+  });
+
+  res.writeHead(302, { location: landingUrl, "cache-control": "no-store" });
+  res.end();
+}
+
+function statsFilters(searchParams) {
+  const dateFrom = parseStatsDate(searchParams.get("from"), false);
+  const dateTo = parseStatsDate(searchParams.get("to"), true);
+  return {
+    campaignId: cleanFilter(searchParams.get("campaign")),
+    mediaId: cleanFilter(searchParams.get("media")),
+    eventType: cleanFilter(searchParams.get("type")),
+    dateFrom,
+    dateTo,
+    dateFromInput: cleanFilter(searchParams.get("from")),
+    dateToInput: cleanFilter(searchParams.get("to"))
+  };
+}
+
+function cleanFilter(value) {
+  return String(value || "").trim().slice(0, 200);
+}
+
+function parseStatsDate(value, endOfDay) {
+  const normalized = cleanFilter(value);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(normalized)) return null;
+  const date = new Date(`${normalized}T00:00:00.000Z`);
+  if (Number.isNaN(date.getTime())) return null;
+  if (endOfDay) date.setUTCDate(date.getUTCDate() + 1);
+  return date;
 }
 
 function verifyMetaWebhook(url, res) {
@@ -643,11 +803,16 @@ function verifyMetaWebhook(url, res) {
   sendJson(res, 403, { error: "Meta webhook verification failed" });
 }
 
-function renderStats(stats) {
+function renderStats(stats, filters = {}, options = {}) {
   const byType = Array.isArray(stats.byType) ? stats.byType : [];
   const maxCount = Math.max(1, ...byType.map((item) => item.count));
   const recentEvents = Array.isArray(stats.recentEvents) ? stats.recentEvents : [];
-  const funnel = stats.funnel || {};
+  const metrics = stats.metrics || stats.funnel || {};
+  const byCampaign = Array.isArray(stats.byCampaign) ? stats.byCampaign : [];
+  const campaigns = Array.isArray(options.campaigns) ? options.campaigns : [];
+  const media = Array.isArray(options.media) ? options.media : [];
+  const eventTypes = Array.isArray(stats.availableEventTypes) ? stats.availableEventTypes : [];
+  const jsonQuery = statsFilterQuery(filters, { format: "json" });
 
   return `<!doctype html>
 <html lang="ru">
@@ -715,7 +880,12 @@ function renderStats(stats) {
     .layout { display: grid; grid-template-columns: 1.1fr .9fr; gap: 14px; }
     .panel { padding: 18px; }
     h2 { font-size: 16px; margin: 0 0 16px; letter-spacing: 0; }
-    .funnel { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+    .filters { display: grid; grid-template-columns: 1.2fr 1.4fr repeat(3, minmax(130px, .8fr)) auto; gap: 10px; align-items: end; margin-bottom: 14px; }
+    .field label { display: block; color: var(--muted); font-size: 12px; font-weight: 800; margin-bottom: 6px; }
+    .field select, .field input { width: 100%; border: 1px solid rgba(42,74,104,.18); border-radius: 8px; background: rgba(255,255,255,.72); color: var(--ink); padding: 10px; font: inherit; }
+    .button { border: 0; border-radius: 8px; background: linear-gradient(135deg, var(--blue), var(--teal)); color: white; padding: 11px 16px; font: inherit; font-weight: 800; cursor: pointer; }
+    .reset { display: inline-block; color: var(--muted); font-size: 13px; padding: 10px 0; }
+    .funnel { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 10px; }
     .step {
       border: 1px solid rgba(255,255,255,.62);
       border-radius: 8px;
@@ -740,11 +910,17 @@ function renderStats(stats) {
     .event-type { font-weight: 800; overflow-wrap: anywhere; }
     .event-time { color: var(--muted); font-size: 12px; white-space: nowrap; }
     .event-meta { color: var(--muted); font-size: 12px; grid-column: 1 / -1; overflow-wrap: anywhere; }
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { text-align: right; padding: 10px 9px; border-top: 1px solid rgba(255,255,255,.58); white-space: nowrap; }
+    th { color: var(--muted); font-size: 11px; text-transform: uppercase; }
+    th:first-child, td:first-child { text-align: left; }
+    tbody a { color: var(--blue); font-weight: 800; text-decoration: none; }
     @media (max-width: 900px) {
       main { width: min(100% - 20px, 1120px); padding-top: 16px; }
       .topbar { display: block; }
       .nav { justify-content: flex-start; margin-top: 14px; }
-      .grid, .layout, .funnel { grid-template-columns: 1fr; }
+      .grid, .layout, .funnel, .filters { grid-template-columns: 1fr; }
       .bar-row { grid-template-columns: 1fr; gap: 6px; }
       .bar-count { text-align: left; }
     }
@@ -755,29 +931,78 @@ function renderStats(stats) {
   <div class="topbar">
     <div>
       <h1>Stats</h1>
-      <p class="subtitle">Живая картина по Instagram, Telegram и воронке доступа.</p>
+      <p class="subtitle">Статистика по кампаниям и сквозной воронке Instagram → Telegram → landing.</p>
     </div>
     <nav class="nav">
       <a href="/admin">Admin</a>
-      <a href="/stats?format=json">JSON</a>
+      <a href="/stats?${esc(jsonQuery)}">JSON</a>
       <a href="/admin/logout">Logout</a>
     </nav>
   </div>
+
+  <form class="panel filters" method="get" action="/stats">
+    <div class="field">
+      <label>Кампания</label>
+      <select name="campaign">
+        <option value="">Все кампании</option>
+        ${campaigns.map((campaign) => selectOption(campaign.id, campaign.name, filters.campaignId)).join("")}
+      </select>
+    </div>
+    <div class="field">
+      <label>Post / media</label>
+      <select name="media">
+        <option value="">Все публикации</option>
+        ${media.map((item) => selectOption(item.id, statsMediaOptionLabel(item), filters.mediaId)).join("")}
+      </select>
+    </div>
+    <div class="field">
+      <label>С даты</label>
+      <input type="date" name="from" value="${esc(filters.dateFromInput || "")}">
+    </div>
+    <div class="field">
+      <label>По дату</label>
+      <input type="date" name="to" value="${esc(filters.dateToInput || "")}">
+    </div>
+    <div class="field">
+      <label>Тип события</label>
+      <select name="type">
+        <option value="">Все события</option>
+        ${eventTypes.map((type) => selectOption(type, eventTitle(type), filters.eventType)).join("")}
+      </select>
+    </div>
+    <button class="button" type="submit">Применить</button>
+    <a class="reset" href="/stats">Сбросить фильтры</a>
+  </form>
 
   <section class="grid">
     ${metricCard("Всего событий", stats.totalEvents, "accent-blue")}
     ${metricCard("За 24 часа", stats.events24h, "accent-teal")}
     ${metricCard("Telegram users", stats.users, "accent-coral")}
-    ${metricCard("Instagram recipients", stats.instagramRecipients, "accent-blue")}
+    ${metricCard("IG recipients", stats.instagramRecipients, "accent-blue")}
   </section>
 
   <section class="panel" style="margin-bottom:14px">
-    <h2>Воронка</h2>
+    <h2>Метрики кампании</h2>
     <div class="funnel">
-      ${funnelStep("Комментарии", funnel.comments)}
-      ${funnelStep("Ответы Meta", funnel.repliesSent)}
-      ${funnelStep("Telegram start", funnel.telegramStarts)}
-      ${funnelStep("Проверки подписки", funnel.subscriptionChecks)}
+      ${funnelStep("Комментарии", metrics.comments)}
+      ${funnelStep("IG replies", metrics.repliesSent)}
+      ${funnelStep("Ошибки Meta", metrics.metaErrors)}
+      ${funnelStep("Telegram starts", metrics.telegramStarts)}
+      ${funnelStep("Подписался", metrics.subscribed)}
+      ${funnelStep("Не подписался", metrics.notSubscribed)}
+      ${funnelStep("Landing clicks", metrics.landingClicks)}
+    </div>
+  </section>
+
+  <section class="panel" style="margin-bottom:14px">
+    <h2>Кампании</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Кампания</th><th>Комментарии</th><th>IG replies</th><th>Meta errors</th><th>TG starts</th><th>Подписался</th><th>Не подписался</th><th>Landing</th></tr></thead>
+        <tbody>
+          ${byCampaign.length ? byCampaign.map((item) => renderCampaignStatsRow(item, filters)).join("") : `<tr><td colspan="8">Нет событий по выбранным фильтрам.</td></tr>`}
+        </tbody>
+      </table>
     </div>
   </section>
 
@@ -796,6 +1021,42 @@ function renderStats(stats) {
 </main>
 </body>
 </html>`;
+}
+
+function selectOption(value, label, selected) {
+  return `<option value="${esc(value)}"${String(value) === String(selected || "") ? " selected" : ""}>${esc(label || value)}</option>`;
+}
+
+function statsMediaOptionLabel(item) {
+  const caption = String(item.caption || "").replace(/\s+/g, " ").trim();
+  return caption ? `${caption.slice(0, 70)} · ${item.id}` : `${item.mediaType || "Media"} · ${item.id}`;
+}
+
+function statsFilterQuery(filters, extra = {}) {
+  const params = new URLSearchParams();
+  if (filters.campaignId) params.set("campaign", filters.campaignId);
+  if (filters.mediaId) params.set("media", filters.mediaId);
+  if (filters.dateFromInput) params.set("from", filters.dateFromInput);
+  if (filters.dateToInput) params.set("to", filters.dateToInput);
+  if (filters.eventType) params.set("type", filters.eventType);
+  for (const [key, value] of Object.entries(extra)) {
+    if (value !== undefined && value !== null && value !== "") params.set(key, String(value));
+  }
+  return params.toString();
+}
+
+function renderCampaignStatsRow(item, filters) {
+  const query = statsFilterQuery({ ...filters, campaignId: item.campaignId });
+  return `<tr>
+    <td><a href="/stats?${esc(query)}">${esc(item.campaignName || item.campaignId)}</a></td>
+    <td>${Number(item.comments || 0)}</td>
+    <td>${Number(item.repliesSent || 0)}</td>
+    <td>${Number(item.metaErrors || 0)}</td>
+    <td>${Number(item.telegramStarts || 0)}</td>
+    <td>${Number(item.subscribed || 0)}</td>
+    <td>${Number(item.notSubscribed || 0)}</td>
+    <td>${Number(item.landingClicks || 0)}</td>
+  </tr>`;
 }
 
 function metricCard(label, value, accentClass) {
@@ -817,6 +1078,8 @@ function eventBar(item, maxCount) {
 
 function renderEvent(event) {
   const details = [
+    event.campaignName || event.campaignId ? `Кампания: ${event.campaignName || event.campaignId}` : "",
+    event.mediaId ? `Media: ${event.mediaId}` : "",
     event.label ? actionTitle(event.label) : "",
     event.status ? `Статус: ${event.status}` : "",
     event.subscribed === undefined ? "" : (event.subscribed ? "Подписка подтверждена" : "Подписки нет"),
@@ -900,7 +1163,8 @@ function eventTitle(type) {
     telegram_welcome_video_failed: "Кружок Telegram не отправился",
     telegram_photo_failed: "Фото Telegram не отправилось",
     telegram_photo_sent: "Фото Telegram отправлено",
-    telegram_subscribed_response_started: "Ответ после подписки начат"
+    telegram_subscribed_response_started: "Ответ после подписки начат",
+    landing_clicked: "Переход на landing"
   };
   return titles[type] || type;
 }
@@ -1525,7 +1789,7 @@ function renderMediaLibrary(config, files, mongoEnabled) {
         <div class="field">
           <label>Файл</label>
           <input name="mediaFile" type="file" accept="image/*,video/*" required>
-          <small>Текущий лимит загрузки: ${formatBytes(MAX_IMAGE_UPLOAD_BYTES)}.</small>
+          <small>Изображения до ${formatBytes(MAX_IMAGE_UPLOAD_BYTES)} будут сжаты сервером. Видео пока до ${formatBytes(MAX_VIDEO_UPLOAD_BYTES)}.</small>
         </div>
       </div>
       <div class="actions">
@@ -1944,7 +2208,7 @@ function renderAdmin(config) {
         <div class="field">
           <label>1. Фото приветствия</label>
           <input class="media-input" name="welcomeImage" type="file" accept="image/*">
-          <small>Хранится в MongoDB GridFS. Перед сохранением браузер попробует сжать до 1.5 MB.</small>
+          <small>Хранится в MongoDB GridFS. Сервер автоматически повернет, уменьшит и сожмет изображение.</small>
         </div>
         <div class="field">
           <label>Текущее фото 1</label>
@@ -2018,52 +2282,7 @@ function renderAdmin(config) {
     </div>
   </form>
 </main>
-<script>
-  const imageInputs = Array.from(document.querySelectorAll(".media-input"));
 
-  for (const input of imageInputs) {
-    input.addEventListener("change", async () => {
-      const file = input.files && input.files[0];
-      if (!file || !file.type.startsWith("image/")) return;
-      if (file.size <= ${Math.floor(MAX_IMAGE_UPLOAD_BYTES)}) return;
-
-      try {
-        const compressed = await compressImage(file, ${Math.floor(MAX_IMAGE_UPLOAD_BYTES)});
-        const dataTransfer = new DataTransfer();
-        dataTransfer.items.add(compressed);
-        input.files = dataTransfer.files;
-      } catch (error) {
-        alert("Не получилось сжать картинку. Выберите файл меньше 1.5 MB.");
-      }
-    });
-  }
-
-  async function compressImage(file, maxBytes) {
-    const bitmap = await createImageBitmap(file);
-    const canvas = document.createElement("canvas");
-    const maxSide = 1600;
-    const scale = Math.min(1, maxSide / Math.max(bitmap.width, bitmap.height));
-    canvas.width = Math.max(1, Math.round(bitmap.width * scale));
-    canvas.height = Math.max(1, Math.round(bitmap.height * scale));
-    const ctx = canvas.getContext("2d");
-    ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-
-    for (const quality of [0.86, 0.78, 0.68, 0.58]) {
-      const blob = await canvasToBlob(canvas, "image/jpeg", quality);
-      if (blob.size <= maxBytes) {
-        return new File([blob], file.name.replace(/\\.[^.]+$/, "") + ".jpg", { type: "image/jpeg" });
-      }
-    }
-
-    throw new Error("compressed image is still too large");
-  }
-
-  function canvasToBlob(canvas, type, quality) {
-    return new Promise((resolve, reject) => {
-      canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error("canvas export failed")), type, quality);
-    });
-  }
-</script>
 </body>
 </html>`;
 }
@@ -2265,7 +2484,7 @@ async function readFormData(req) {
         );
       }
       const sizeErrors = Object.values(files).some((file) => file.tooLarge)
-        ? ["Картинка слишком большая. Максимум 1.5 MB."]
+        ? [`Файл слишком большой. Максимум ${formatBytes(MAX_IMAGE_UPLOAD_BYTES)} для изображений и ${formatBytes(MAX_VIDEO_UPLOAD_BYTES)} для видео.`]
         : [];
       resolve({ fields, files, errors: [...errors, ...sizeErrors] });
     });

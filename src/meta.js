@@ -73,9 +73,9 @@ export class MetaClient {
         fromId: actorId || ""
       }));
       if (campaignConfig.instagram.publicReplyEnabled === true && campaignConfig.instagram.publicCommentReply) {
-        await this.publicReplyToComment(commentId, campaignConfig.instagram.publicCommentReply, campaign);
+        await this.publicReplyToComment(commentId, campaignConfig.instagram.publicCommentReply, campaign, { commentId, mediaId });
       }
-      const sent = await this.privateReplyToComment(commentId, campaignConfig);
+      const sent = await this.privateReplyToComment(commentId, campaignConfig, { commentId, mediaId });
       if (sent && recipientKey) {
         await markInstagramRecipientOnce(recipientKey, {
           source: "comment",
@@ -171,24 +171,24 @@ export class MetaClient {
     return hasInstagramRecipient(`instagram:${instagramUserId}`);
   }
 
-  async privateReplyToComment(commentId, config) {
+  async privateReplyToComment(commentId, config, context = {}) {
     const url = this.graphUrl(`/me/messages`);
     const withImage = this.instagramMessagePayload(config);
     const sent = await this.postGraph(url, {
       recipient: { comment_id: commentId },
       message: withImage
-    }, "private reply", config.campaign || null);
+    }, "private reply", campaignEvent(config.campaign, context));
     if (sent || !config.instagram.directMedia?.imageId) return sent;
 
     return this.postGraph(url, {
       recipient: { comment_id: commentId },
       message: this.instagramButtonMessage(config)
-    }, "private reply fallback", config.campaign || null);
+    }, "private reply fallback", campaignEvent(config.campaign, context));
   }
 
-  async publicReplyToComment(commentId, message, campaign = null) {
+  async publicReplyToComment(commentId, message, campaign = null, context = {}) {
     const url = this.graphUrl(`/${commentId}/replies`);
-    await this.postGraph(url, { message }, "public comment reply", campaign);
+    await this.postGraph(url, { message }, "public comment reply", campaignEvent(campaign, context));
   }
 
   async sendDirectMessage(recipientId, config) {
@@ -271,7 +271,7 @@ export class MetaClient {
   }
 
   async postGraph(url, payload, label = "Meta API request", eventPayload = {}) {
-    const eventContext = campaignEvent(eventPayload);
+    const eventContext = eventPayload?.campaignId ? eventPayload : campaignEvent(eventPayload);
     if (!this.accessToken) {
       console.warn("META_ACCESS_TOKEN is empty; skipped Meta API call.");
       await recordEvent("meta_api_skipped", { label, reason: "missing_access_token", ...eventContext });
