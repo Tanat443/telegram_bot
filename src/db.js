@@ -143,6 +143,20 @@ export async function recordEvent(type, payload = {}) {
   });
 }
 
+export async function saveConsultationLead(lead) {
+  const db = await getDb();
+  if (!db) return null;
+  await ensureIndexes(db);
+
+  const result = await db.collection("consultation_leads").insertOne({
+    ...lead,
+    status: "new",
+    source: "lesson",
+    createdAt: new Date()
+  });
+  return String(result.insertedId);
+}
+
 export async function markEventOnce(key, ttlSeconds = 600) {
   const db = await getDb();
   if (!db) return null;
@@ -446,6 +460,8 @@ async function ensureIndexes(db) {
     db.collection("events").createIndex({ type: 1, createdAt: -1 }),
     db.collection("events").createIndex({ campaignId: 1, createdAt: -1 }),
     db.collection("events").createIndex({ campaignId: 1, mediaId: 1, type: 1, createdAt: -1 }),
+    db.collection("consultation_leads").createIndex({ createdAt: -1 }),
+    db.collection("consultation_leads").createIndex({ status: 1, createdAt: -1 }),
     db.collection("telegram_users").createIndex({ updatedAt: -1 })
   ]);
 

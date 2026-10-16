@@ -4,7 +4,8 @@ import Busboy from "busboy";
 import sharp from "sharp";
 import { URL } from "node:url";
 import { getEnv, loadDotEnv, normalizeUrl, readCampaigns, readConfig, readConfigForCampaignId, writeConfig } from "./config.js";
-import { clearStats, getMediaFile, getStats, hasMongo, listInstagramMedia, listMediaFiles, recordEvent, saveMediaFile, upsertInstagramMedia } from "./db.js";
+import { clearStats, getMediaFile, getStats, hasMongo, listInstagramMedia, listMediaFiles, recordEvent, saveConsultationLead, saveMediaFile, upsertInstagramMedia } from "./db.js";
+import { renderLessonPage } from "./lesson.js";
 import { MetaClient } from "./meta.js";
 import { TelegramBot } from "./telegram.js";
 
@@ -57,6 +58,18 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "GET" && url.pathname === "/terms") {
       return sendHtml(res, renderTerms());
+    }
+
+    if (req.method === "GET" && url.pathname === "/lesson") {
+      return sendHtml(res, renderLessonPage({
+        videoUrl: getEnv("LESSON_VIDEO_URL"),
+        posterUrl: getEnv("LESSON_VIDEO_POSTER_URL"),
+        sent: url.searchParams.get("sent") === "1"
+      }));
+    }
+
+    if (req.method === "POST" && url.pathname === "/lesson/consultation") {
+      return handleLessonConsultation(req, res);
     }
 
     if (req.method === "GET" && url.pathname.startsWith("/media/")) {
@@ -206,6 +219,45 @@ function isMetaWebhookPath(pathname) {
 
 function isTelegramWebhookPath(pathname) {
   return pathname === "/webhooks/telegram" || pathname === "/api/webhooks/telegram";
+}
+
+async function handleLessonConsultation(req, res) {
+  const form = await readForm(req);
+  if (form.website) {
+    res.writeHead(303, { location: "/lesson?sent=1#consultation" });
+    res.end();
+    return;
+  }
+
+  const values = {
+    name: String(form.name || "").trim().slice(0, 80),
+    contact: String(form.contact || "").trim().slice(0, 120),
+    experience: String(form.experience || "").trim().slice(0, 40),
+    goal: String(form.goal || "").trim().slice(0, 800)
+  };
+  const allowedExperience = new Set(["none", "beginner", "active"]);
+  let error = "";
+  if (!values.name || !values.contact || !values.goal || !allowedExperience.has(values.experience)) {
+    error = "Барлық міндетті жолды толтыр.";
+  } else if (form.consent !== "yes") {
+    error = "Өтінімді жіберу үшін келісімді раста.";
+  } else if (!hasMongo()) {
+    error = "Өтінімді сақтау қызметі уақытша қолжетімсіз. Кейінірек қайталап көр.";
+  }
+
+  if (error) {
+    return sendHtml(res, renderLessonPage({
+      videoUrl: getEnv("LESSON_VIDEO_URL"),
+      posterUrl: getEnv("LESSON_VIDEO_POSTER_URL"),
+      error,
+      values
+    }), 400);
+  }
+
+  const leadId = await saveConsultationLead(values);
+  await recordEvent("lesson_consultation_submitted", { leadId });
+  res.writeHead(303, { location: "/lesson?sent=1#consultation" });
+  res.end();
 }
 
 function shouldUseTelegramPolling() {
