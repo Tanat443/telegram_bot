@@ -4,7 +4,7 @@ import Busboy from "busboy";
 import sharp from "sharp";
 import { URL } from "node:url";
 import { getEnv, loadDotEnv, normalizeUrl, readCampaigns, readConfig, readConfigForCampaignId, writeConfig } from "./config.js";
-import { getMediaFile, getStats, hasMongo, listInstagramMedia, listMediaFiles, recordEvent, saveMediaFile, upsertInstagramMedia } from "./db.js";
+import { clearStats, getMediaFile, getStats, hasMongo, listInstagramMedia, listMediaFiles, recordEvent, saveMediaFile, upsertInstagramMedia } from "./db.js";
 import { MetaClient } from "./meta.js";
 import { TelegramBot } from "./telegram.js";
 
@@ -109,6 +109,11 @@ const server = http.createServer(async (req, res) => {
       return handleCampaignEditor(req, res, null);
     }
 
+    if (url.pathname.startsWith("/admin/campaigns/") && url.pathname.endsWith("/delete")) {
+      const campaignId = url.pathname.slice("/admin/campaigns/".length, -"/delete".length);
+      return handleCampaignDelete(req, res, decodeURIComponent(campaignId));
+    }
+
     if (url.pathname.startsWith("/admin/campaigns/")) {
       return handleCampaignEditor(req, res, decodeURIComponent(url.pathname.replace("/admin/campaigns/", "")));
     }
@@ -127,6 +132,10 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "GET" && url.pathname === "/stats") {
       return handleStats(req, url, res);
+    }
+
+    if (url.pathname === "/stats/clear") {
+      return handleClearStats(req, res);
     }
 
     if (req.method === "GET" && url.pathname === "/telegram/set-webhook") {
@@ -362,76 +371,9 @@ async function handleAdmin(req, res) {
   if (!requireAdmin(req, res)) return;
 
   if (req.method === "GET") {
-    const config = await readConfig();
-    return sendHtml(res, renderAdmin(config));
-  }
-
-  if (req.method === "POST") {
-    const { fields: form, files, errors } = await readFormData(req);
-    if (errors.length) {
-      return sendHtml(res, renderMessage(errors.join("<br>"), "/admin"), 400);
-    }
-
-    const config = await readConfig();
-    config.landingUrl = normalizeUrl(form.landingUrl);
-    config.telegram.channelUsername = form.channelUsername;
-    config.telegram.startPayload = form.startPayload || "ig";
-    config.instagram.enabledTriggers.comments = form.comments === "on";
-    config.instagram.enabledTriggers.directMessages = form.directMessages === "on";
-    config.instagram.enabledTriggers.shares = form.shares === "on";
-    config.instagram.keywords = splitKeywords(form.keywords);
-    config.instagram.publicReplyEnabled = form.publicReplyEnabled === "on";
-    config.instagram.publicCommentReply = form.publicCommentReply;
-    config.instagram.directMessage.text = form.directText;
-    config.instagram.directMessage.buttonText = form.directButtonText;
-    config.instagram.directMedia = config.instagram.directMedia || {};
-    config.telegramTexts.welcome = form.tgWelcome;
-    config.telegramTexts.notSubscribed = form.tgNotSubscribed;
-    config.telegramTexts.subscribed = form.tgSubscribed;
-    config.telegramTexts.checkButton = form.tgCheckButton;
-    config.telegramTexts.channelButton = form.tgChannelButton;
-    config.telegramTexts.landingButton = form.tgLandingButton;
-    config.telegramMedia = config.telegramMedia || {};
-
-    if (form.removeWelcomeImage === "on") {
-      config.telegramMedia.welcomeImageId = "";
-      config.telegramMedia.welcomePhoto1Id = "";
-    }
-    if (form.removeDirectImage === "on") config.instagram.directMedia.imageId = "";
-    if (form.removeWelcomeCircleVideo === "on") config.telegramMedia.welcomeCircleVideoId = "";
-    if (form.removeWelcomePhoto2 === "on") config.telegramMedia.welcomePhoto2Id = "";
-    if (form.removeSubscribedPhoto === "on") config.telegramMedia.subscribedPhotoId = "";
-
-    try {
-      if (files.welcomeImage?.buffer?.length) {
-        const imageId = await saveUploadedMedia(files.welcomeImage, "telegram_welcome_photo_1", "image/");
-        if (imageId) {
-          config.telegramMedia.welcomeImageId = imageId;
-          config.telegramMedia.welcomePhoto1Id = imageId;
-        }
-      }
-      if (files.directImage?.buffer?.length) {
-        const imageId = await saveUploadedMedia(files.directImage, "instagram_direct_image", "image/");
-        if (imageId) config.instagram.directMedia.imageId = imageId;
-      }
-      if (files.welcomeCircleVideo?.buffer?.length) {
-        const videoId = await saveUploadedMedia(files.welcomeCircleVideo, "telegram_welcome_circle_video", "video/");
-        if (videoId) config.telegramMedia.welcomeCircleVideoId = videoId;
-      }
-      if (files.welcomePhoto2?.buffer?.length) {
-        const imageId = await saveUploadedMedia(files.welcomePhoto2, "telegram_welcome_photo_2", "image/");
-        if (imageId) config.telegramMedia.welcomePhoto2Id = imageId;
-      }
-      if (files.subscribedPhoto?.buffer?.length) {
-        const imageId = await saveUploadedMedia(files.subscribedPhoto, "telegram_subscribed_photo", "image/");
-        if (imageId) config.telegramMedia.subscribedPhotoId = imageId;
-      }
-    } catch (error) {
-      return sendHtml(res, renderMessage(error.message, "/admin"), 400);
-    }
-
-    await writeConfig(config);
-    return sendHtml(res, renderMessage("Настройки сохранены", "/admin"));
+    res.writeHead(302, { location: "/admin/campaigns" });
+    res.end();
+    return;
   }
 
   return sendJson(res, 405, { error: "Method not allowed" });
@@ -470,6 +412,22 @@ async function handleCampaignEditor(req, res, campaignId) {
 
   await writeConfig(config);
   return sendHtml(res, renderMessage("Автоматизация сохранена", `/admin/campaigns/${encodeURIComponent(nextCampaign._id)}`));
+}
+
+async function handleCampaignDelete(req, res, campaignId) {
+  if (!requireAdmin(req, res)) return;
+  if (req.method !== "POST") return sendJson(res, 405, { error: "Method not allowed" });
+
+  const config = await readConfig();
+  const campaigns = adminCampaigns(config);
+  const remaining = campaigns.filter((item) => String(item._id || item.id) !== campaignId);
+  if (remaining.length === campaigns.length) {
+    return sendHtml(res, renderMessage("Автоматизация не найдена", "/admin/campaigns"), 404);
+  }
+
+  config.campaigns = remaining;
+  await writeConfig(config);
+  return sendHtml(res, renderMessage("Автоматизация удалена", "/admin/campaigns"));
 }
 
 async function handleAdminMedia(req, res) {
@@ -731,6 +689,25 @@ async function handleStats(req, url, res) {
   return sendHtml(res, renderStats(stats, filters, { campaigns, media: mediaOptions }));
 }
 
+async function handleClearStats(req, res) {
+  if (!requireAdmin(req, res, "/stats")) return;
+  if (req.method !== "POST") return sendJson(res, 405, { error: "Method not allowed" });
+  if (!hasMongo()) return sendHtml(res, renderMessage("MONGODB_URI не настроен", "/stats"), 400);
+
+  const form = await readForm(req);
+  if (form.confirm !== "clear-stats") {
+    return sendHtml(res, renderMessage("Очистка статистики не подтверждена", "/stats"), 400);
+  }
+
+  const params = new URLSearchParams();
+  for (const name of ["campaign", "media", "from", "to", "type"]) {
+    if (form[name]) params.set(name, form[name]);
+  }
+  const filters = statsFilters(params);
+  const deletedCount = await clearStats(filters);
+  return sendHtml(res, renderMessage(`Удалено событий: ${deletedCount}`, "/stats"));
+}
+
 async function handleLandingRedirect(req, res, url) {
   const rawCampaignId = url.pathname.slice(3);
   let campaignId;
@@ -884,7 +861,10 @@ function renderStats(stats, filters = {}, options = {}) {
     .field label { display: block; color: var(--muted); font-size: 12px; font-weight: 800; margin-bottom: 6px; }
     .field select, .field input { width: 100%; border: 1px solid rgba(42,74,104,.18); border-radius: 8px; background: rgba(255,255,255,.72); color: var(--ink); padding: 10px; font: inherit; }
     .button { border: 0; border-radius: 8px; background: linear-gradient(135deg, var(--blue), var(--teal)); color: white; padding: 11px 16px; font: inherit; font-weight: 800; cursor: pointer; }
+    .button.danger { background: linear-gradient(135deg, #b83232, #d96b4b); }
     .reset { display: inline-block; color: var(--muted); font-size: 13px; padding: 10px 0; }
+    .clear-row { display: flex; justify-content: space-between; align-items: center; gap: 14px; margin-bottom: 14px; }
+    .clear-row form { margin: 0; }
     .funnel { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 10px; }
     .step {
       border: 1px solid rgba(255,255,255,.62);
@@ -921,6 +901,7 @@ function renderStats(stats, filters = {}, options = {}) {
       .topbar { display: block; }
       .nav { justify-content: flex-start; margin-top: 14px; }
       .grid, .layout, .funnel, .filters { grid-template-columns: 1fr; }
+      .clear-row { display: grid; }
       .bar-row { grid-template-columns: 1fr; gap: 6px; }
       .bar-count { text-align: left; }
     }
@@ -973,6 +954,18 @@ function renderStats(stats, filters = {}, options = {}) {
     <button class="button" type="submit">Применить</button>
     <a class="reset" href="/stats">Сбросить фильтры</a>
   </form>
+
+  <section class="panel clear-row">
+    <div>
+      <h2 style="margin-bottom:5px">Очистка статистики</h2>
+      <div class="subtitle">Удалит события по текущим фильтрам. Без фильтров удалит всю статистику событий.</div>
+    </div>
+    <form method="post" action="/stats/clear" onsubmit="return confirm('Удалить статистику по текущим фильтрам? Это действие нельзя отменить.')">
+      <input type="hidden" name="confirm" value="clear-stats">
+      ${statsFilterHiddenInputs(filters)}
+      <button class="button danger" type="submit">Очистить статистику</button>
+    </form>
+  </section>
 
   <section class="grid">
     ${metricCard("Всего событий", stats.totalEvents, "accent-blue")}
@@ -1043,6 +1036,20 @@ function statsFilterQuery(filters, extra = {}) {
     if (value !== undefined && value !== null && value !== "") params.set(key, String(value));
   }
   return params.toString();
+}
+
+function statsFilterHiddenInputs(filters) {
+  const values = {
+    campaign: filters.campaignId,
+    media: filters.mediaId,
+    from: filters.dateFromInput,
+    to: filters.dateToInput,
+    type: filters.eventType
+  };
+  return Object.entries(values)
+    .filter(([, value]) => value)
+    .map(([name, value]) => `<input type="hidden" name="${name}" value="${esc(value)}">`)
+    .join("");
 }
 
 function renderCampaignStatsRow(item, filters) {
@@ -1424,6 +1431,7 @@ function renderAdminShell(title, config, content) {
       min-height: 42px;
     }
     .button.primary, button.primary { background: linear-gradient(135deg, var(--blue), var(--teal)); color: white; font-weight: 800; }
+    .button.danger, button.danger { background: linear-gradient(135deg, #b83232, var(--coral)); color: white; font-weight: 800; }
     .panel, .card {
       border: 1px solid rgba(255,255,255,.72);
       border-radius: 8px;
@@ -1486,7 +1494,6 @@ function renderAdminShell(title, config, content) {
       <p class="subtitle">Автоматизации используют один Telegram bot, а нужный сценарий выбирается через start payload.</p>
     </div>
     <nav class="nav">
-      <a href="/admin">Settings</a>
       <a href="/admin/campaigns">Автоматизации</a>
       <a href="/admin/posts">Posts</a>
       <a href="/admin/media">Media</a>
@@ -1505,7 +1512,7 @@ function renderCampaignList(config) {
   const campaigns = adminCampaigns(config);
   const content = `
     <div class="actions" style="margin-bottom:14px">
-      <div class="muted">${campaigns.length ? `Создано автоматизаций: ${campaigns.length}` : "Пока нет отдельных автоматизаций. Работает default-сценарий из Settings."}</div>
+      <div class="muted">${campaigns.length ? `Создано автоматизаций: ${campaigns.length}` : "Пока нет автоматизаций."}</div>
       <a class="button primary" href="/admin/campaigns/new">Создать автоматизацию</a>
     </div>
     <section class="grid">
@@ -1536,15 +1543,20 @@ function renderCampaignCard(campaign) {
         ${triggers.shares ? `<span class="pill">Share</span>` : ""}
       </div>
       <p class="muted">Payload: <strong>${esc(campaign.telegram?.startPayload || "")}</strong></p>
-      <a class="button" href="/admin/campaigns/${encodeURIComponent(campaign._id || campaign.id)}">Редактировать</a>
+      <div class="meta">
+        <a class="button" href="/admin/campaigns/${encodeURIComponent(campaign._id || campaign.id)}">Редактировать</a>
+        <form method="post" action="/admin/campaigns/${encodeURIComponent(campaign._id || campaign.id)}/delete" onsubmit="return confirm('Удалить эту автоматизацию? Это действие нельзя отменить.')">
+          <button class="danger" type="submit">Удалить</button>
+        </form>
+      </div>
     </article>`;
 }
 
 function renderEmptyCampaignCard() {
   return `
     <article class="card">
-      <h2>Default-сценарий активен</h2>
-      <p class="muted">Сейчас Instagram webhook использует глобальные настройки из Settings. Создай автоматизацию, чтобы привязать отдельные посты/Reels, keywords, Telegram payload и landing URL.</p>
+      <h2>Создайте первую автоматизацию</h2>
+      <p class="muted">Привяжите posts/Reels, keywords, Telegram payload и landing URL в одной кампании.</p>
       <a class="button primary" href="/admin/campaigns/new">Создать первую</a>
     </article>`;
 }
@@ -1690,7 +1702,10 @@ function renderCampaignEditor(config, campaign, existing, posts = [], mediaFiles
       </section>
 
       <div class="actions">
-        <a class="button" href="/admin/campaigns">Назад</a>
+        <div class="meta">
+          <a class="button" href="/admin/campaigns">Назад</a>
+          ${existing ? `<button class="danger" type="submit" formaction="/admin/campaigns/${encodeURIComponent(campaign._id)}/delete" formmethod="post" onclick="return confirm('Удалить эту автоматизацию? Это действие нельзя отменить.')">Удалить</button>` : ""}
+        </div>
         <button class="primary" type="submit">Сохранить автоматизацию</button>
       </div>
     </form>

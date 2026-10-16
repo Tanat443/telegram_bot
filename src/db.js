@@ -313,6 +313,14 @@ export async function getStats(filters = {}) {
   };
 }
 
+export async function clearStats(filters = {}) {
+  const db = await getDb();
+  if (!db) return 0;
+
+  const result = await db.collection("events").deleteMany(statsQuery(filters));
+  return result.deletedCount || 0;
+}
+
 function statsQuery(filters) {
   const query = {};
   if (filters.campaignId) query.campaignId = String(filters.campaignId);
