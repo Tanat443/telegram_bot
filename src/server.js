@@ -224,23 +224,22 @@ function isTelegramWebhookPath(pathname) {
 async function handleLessonConsultation(req, res) {
   const form = await readForm(req);
   if (form.website) {
-    res.writeHead(303, { location: "/lesson?sent=1#consultation" });
+    res.writeHead(303, { location: "/lesson?sent=1" });
     res.end();
     return;
   }
 
   const values = {
     name: String(form.name || "").trim().slice(0, 80),
-    contact: String(form.contact || "").trim().slice(0, 120),
+    contact: String(form.contact || "").trim().slice(0, 24),
     experience: String(form.experience || "").trim().slice(0, 40),
-    goal: String(form.goal || "").trim().slice(0, 800)
+    goal: String(form.goal || "").trim().slice(0, 40)
   };
-  const allowedExperience = new Set(["none", "beginner", "active"]);
+  const allowedExperience = new Set(["none", "account", "tried", "portfolio"]);
+  const allowedGoals = new Set(["capital", "halal", "income", "manage"]);
   let error = "";
-  if (!values.name || !values.contact || !values.goal || !allowedExperience.has(values.experience)) {
+  if (!values.name || !values.contact || !allowedExperience.has(values.experience) || !allowedGoals.has(values.goal)) {
     error = "Барлық міндетті жолды толтыр.";
-  } else if (form.consent !== "yes") {
-    error = "Өтінімді жіберу үшін келісімді раста.";
   } else if (!hasMongo()) {
     error = "Өтінімді сақтау қызметі уақытша қолжетімсіз. Кейінірек қайталап көр.";
   }
@@ -256,7 +255,7 @@ async function handleLessonConsultation(req, res) {
 
   const leadId = await saveConsultationLead(values);
   await recordEvent("lesson_consultation_submitted", { leadId });
-  res.writeHead(303, { location: "/lesson?sent=1#consultation" });
+  res.writeHead(303, { location: "/lesson?sent=1" });
   res.end();
 }
 
