@@ -202,6 +202,10 @@ function normalizeCampaign(campaign, config) {
   const telegram = campaign?.telegram || {};
   const instagram = campaign?.instagram || {};
   const directMessage = instagram.directMessage || {};
+  const inheritDefaults = campaign?.inheritDefaults || {};
+  const useDefaultLanding = Boolean(inheritDefaults.landing);
+  const useDefaultInstagramMessage = Boolean(inheritDefaults.instagramMessage);
+  const useDefaultTelegramFlow = Boolean(inheritDefaults.telegramFlow);
 
   return {
     _id: id,
@@ -210,20 +214,27 @@ function normalizeCampaign(campaign, config) {
     status: campaign?.status || "active",
     mediaIds: normalizeStringArray(campaign?.mediaIds),
     keywords: normalizeStringArray(campaign?.keywords ?? config.instagram?.keywords),
-    landingUrl: normalizeUrl(campaign?.landingUrl || config.landingUrl || ""),
+    inheritDefaults: {
+      landing: useDefaultLanding,
+      instagramMessage: useDefaultInstagramMessage,
+      telegramFlow: useDefaultTelegramFlow
+    },
+    landingUrl: normalizeUrl(useDefaultLanding ? config.landingUrl : campaign?.landingUrl || config.landingUrl || ""),
     telegram: {
-      channelUsername: telegram.channelUsername || campaign?.telegramChannelUsername || config.telegram?.channelUsername || "",
+      channelUsername: useDefaultTelegramFlow
+        ? config.telegram?.channelUsername || ""
+        : telegram.channelUsername || campaign?.telegramChannelUsername || config.telegram?.channelUsername || "",
       startPayload: telegram.startPayload || campaign?.startPayload || (id === "default" ? config.telegram?.startPayload || "ig" : `camp_${id}`)
     },
     telegramTexts: {
       ...config.telegramTexts,
-      ...(campaign?.telegramTexts || {}),
-      ...(telegram.texts || {})
+      ...(useDefaultTelegramFlow ? {} : campaign?.telegramTexts || {}),
+      ...(useDefaultTelegramFlow ? {} : telegram.texts || {})
     },
     telegramMedia: {
       ...config.telegramMedia,
-      ...(campaign?.telegramMedia || {}),
-      ...(telegram.media || {})
+      ...(useDefaultTelegramFlow ? {} : campaign?.telegramMedia || {}),
+      ...(useDefaultTelegramFlow ? {} : telegram.media || {})
     },
     instagram: {
       enabledTriggers: {
@@ -234,16 +245,26 @@ function normalizeCampaign(campaign, config) {
         directMessages: instagram.directMessages ?? instagram.enabledTriggers?.directMessages ?? instagram.triggers?.directMessages ?? config.instagram?.enabledTriggers?.directMessages ?? false,
         shares: instagram.shares ?? instagram.enabledTriggers?.shares ?? instagram.triggers?.shares ?? config.instagram?.enabledTriggers?.shares ?? false
       },
-      publicReplyEnabled: instagram.publicReplyEnabled ?? config.instagram?.publicReplyEnabled ?? false,
-      publicCommentReply: instagram.publicCommentReply ?? config.instagram?.publicCommentReply ?? "",
+      publicReplyEnabled: useDefaultInstagramMessage
+        ? config.instagram?.publicReplyEnabled ?? false
+        : instagram.publicReplyEnabled ?? config.instagram?.publicReplyEnabled ?? false,
+      publicCommentReply: useDefaultInstagramMessage
+        ? config.instagram?.publicCommentReply ?? ""
+        : instagram.publicCommentReply ?? config.instagram?.publicCommentReply ?? "",
       directMessage: {
-        text: directMessage.text || instagram.privateReplyText || config.instagram?.directMessage?.text || "",
-        buttonText: directMessage.buttonText || instagram.buttonText || config.instagram?.directMessage?.buttonText || "Open"
+        text: useDefaultInstagramMessage
+          ? config.instagram?.directMessage?.text || ""
+          : directMessage.text || instagram.privateReplyText || config.instagram?.directMessage?.text || "",
+        buttonText: useDefaultInstagramMessage
+          ? config.instagram?.directMessage?.buttonText || "Open"
+          : directMessage.buttonText || instagram.buttonText || config.instagram?.directMessage?.buttonText || "Open"
       },
       directMedia: {
         ...config.instagram?.directMedia,
-        ...(instagram.directMedia || {}),
-        imageId: instagram.imageId || instagram.directMedia?.imageId || config.instagram?.directMedia?.imageId || ""
+        ...(useDefaultInstagramMessage ? {} : instagram.directMedia || {}),
+        imageId: useDefaultInstagramMessage
+          ? config.instagram?.directMedia?.imageId || ""
+          : instagram.imageId || instagram.directMedia?.imageId || config.instagram?.directMedia?.imageId || ""
       }
     }
   };

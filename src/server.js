@@ -450,13 +450,17 @@ async function handleCampaignEditor(req, res, campaignId) {
     }
     const posts = hasMongo() ? await listInstagramMedia() : [];
     const mediaFiles = hasMongo() ? await listMediaFiles() : [];
-    return sendHtml(res, renderCampaignEditor(config, campaign || defaultAdminCampaign(config), Boolean(campaignId), posts, mediaFiles));
+    return sendHtml(res, renderCampaignEditor(config, campaign || defaultAdminCampaign(config), Boolean(campaignId), posts, mediaFiles, campaigns));
   }
 
   if (req.method !== "POST") return sendJson(res, 405, { error: "Method not allowed" });
 
   const form = await readForm(req);
   const nextCampaign = normalizeCampaignForm(form, config, campaigns.length);
+  const enabledTriggers = nextCampaign.instagram?.enabledTriggers || {};
+  if (!enabledTriggers.comments && !enabledTriggers.directMessages && !enabledTriggers.shares) {
+    return sendHtml(res, renderMessage("Выберите хотя бы одно событие для запуска автоматизации.", campaignId ? `/admin/campaigns/${encodeURIComponent(campaignId)}` : "/admin/campaigns/new"), 400);
+  }
   const nextCampaigns = campaigns.filter((item) => String(item._id || item.id) !== nextCampaign._id);
   nextCampaigns.push(nextCampaign);
   config.campaigns = nextCampaigns.sort((a, b) => Number(b.priority || 0) - Number(a.priority || 0));
@@ -1308,6 +1312,11 @@ function normalizeCampaignForm(form, config, index = 0) {
     mediaIds: form.mediaIds,
     keywords: form.keywords,
     landingUrl: form.landingUrl,
+    inheritDefaults: {
+      landing: form.landingMode !== "custom",
+      instagramMessage: form.instagramMessageMode !== "custom",
+      telegramFlow: form.telegramMode !== "custom"
+    },
     instagram: {
       enabledTriggers: {
         comments: form.comments === "on",
@@ -1350,6 +1359,10 @@ function normalizeAdminCampaign(campaign, config, index) {
   const telegram = campaign?.telegram || {};
   const instagram = campaign?.instagram || {};
   const directMessage = instagram.directMessage || {};
+  const inheritDefaults = campaign?.inheritDefaults || {};
+  const useDefaultLanding = Boolean(inheritDefaults.landing);
+  const useDefaultInstagramMessage = Boolean(inheritDefaults.instagramMessage);
+  const useDefaultTelegramFlow = Boolean(inheritDefaults.telegramFlow);
 
   return {
     _id: id,
@@ -1358,48 +1371,54 @@ function normalizeAdminCampaign(campaign, config, index) {
     priority: Number(campaign?.priority || 0),
     mediaIds: splitLines(campaign?.mediaIds),
     keywords: splitKeywords(Array.isArray(campaign?.keywords) ? campaign.keywords.join(",") : campaign?.keywords),
-    landingUrl: normalizeUrl(campaign?.landingUrl || config.landingUrl),
+    inheritDefaults: {
+      landing: useDefaultLanding,
+      instagramMessage: useDefaultInstagramMessage,
+      telegramFlow: useDefaultTelegramFlow
+    },
+    landingUrl: normalizeUrl(useDefaultLanding ? config.landingUrl : campaign?.landingUrl || config.landingUrl),
     instagram: {
       enabledTriggers: {
         comments: Boolean(instagram.enabledTriggers?.comments),
         directMessages: Boolean(instagram.enabledTriggers?.directMessages),
         shares: Boolean(instagram.enabledTriggers?.shares)
       },
-      publicReplyEnabled: Boolean(instagram.publicReplyEnabled),
-      publicCommentReply: String(instagram.publicCommentReply || config.instagram?.publicCommentReply || ""),
+      publicReplyEnabled: useDefaultInstagramMessage ? Boolean(config.instagram?.publicReplyEnabled) : Boolean(instagram.publicReplyEnabled),
+      publicCommentReply: String(useDefaultInstagramMessage ? config.instagram?.publicCommentReply || "" : instagram.publicCommentReply || config.instagram?.publicCommentReply || ""),
       directMessage: {
-        text: String(directMessage.text || config.instagram?.directMessage?.text || ""),
-        buttonText: String(directMessage.buttonText || config.instagram?.directMessage?.buttonText || "")
+        text: String(useDefaultInstagramMessage ? config.instagram?.directMessage?.text || "" : directMessage.text || config.instagram?.directMessage?.text || ""),
+        buttonText: String(useDefaultInstagramMessage ? config.instagram?.directMessage?.buttonText || "" : directMessage.buttonText || config.instagram?.directMessage?.buttonText || "")
       },
       directMedia: {
-        imageId: String(instagram.directMedia?.imageId || "")
+        imageId: String(useDefaultInstagramMessage ? config.instagram?.directMedia?.imageId || "" : instagram.directMedia?.imageId || "")
       }
     },
     telegram: {
-      channelUsername: String(telegram.channelUsername || config.telegram?.channelUsername || ""),
+      channelUsername: String(useDefaultTelegramFlow ? config.telegram?.channelUsername || "" : telegram.channelUsername || config.telegram?.channelUsername || ""),
       startPayload: slugify(telegram.startPayload || `camp-${id}`).replaceAll("-", "_")
     },
     telegramTexts: {
-      welcome: String(campaign?.telegramTexts?.welcome || config.telegramTexts?.welcome || ""),
-      notSubscribed: String(campaign?.telegramTexts?.notSubscribed || config.telegramTexts?.notSubscribed || ""),
-      subscribed: String(campaign?.telegramTexts?.subscribed || config.telegramTexts?.subscribed || "")
+      welcome: String(useDefaultTelegramFlow ? config.telegramTexts?.welcome || "" : campaign?.telegramTexts?.welcome || config.telegramTexts?.welcome || ""),
+      notSubscribed: String(useDefaultTelegramFlow ? config.telegramTexts?.notSubscribed || "" : campaign?.telegramTexts?.notSubscribed || config.telegramTexts?.notSubscribed || ""),
+      subscribed: String(useDefaultTelegramFlow ? config.telegramTexts?.subscribed || "" : campaign?.telegramTexts?.subscribed || config.telegramTexts?.subscribed || "")
     },
     telegramMedia: {
-      welcomePhoto1Id: String(campaign?.telegramMedia?.welcomePhoto1Id || ""),
-      welcomeCircleVideoId: String(campaign?.telegramMedia?.welcomeCircleVideoId || ""),
-      welcomePhoto2Id: String(campaign?.telegramMedia?.welcomePhoto2Id || ""),
-      subscribedPhotoId: String(campaign?.telegramMedia?.subscribedPhotoId || "")
+      welcomePhoto1Id: String(useDefaultTelegramFlow ? config.telegramMedia?.welcomePhoto1Id || config.telegramMedia?.welcomeImageId || "" : campaign?.telegramMedia?.welcomePhoto1Id || ""),
+      welcomeCircleVideoId: String(useDefaultTelegramFlow ? config.telegramMedia?.welcomeCircleVideoId || "" : campaign?.telegramMedia?.welcomeCircleVideoId || ""),
+      welcomePhoto2Id: String(useDefaultTelegramFlow ? config.telegramMedia?.welcomePhoto2Id || "" : campaign?.telegramMedia?.welcomePhoto2Id || ""),
+      subscribedPhotoId: String(useDefaultTelegramFlow ? config.telegramMedia?.subscribedPhotoId || "" : campaign?.telegramMedia?.subscribedPhotoId || "")
     },
     updatedAt: new Date().toISOString()
   };
 }
 
 function defaultAdminCampaign(config) {
-  return normalizeAdminCampaign({
+  const nextPriority = adminCampaigns(config).reduce((max, campaign) => Math.max(max, Number(campaign.priority || 0)), 0) + 10;
+  const campaign = normalizeAdminCampaign({
     _id: "",
     name: "",
     status: "active",
-    priority: 0,
+    priority: nextPriority,
     mediaIds: [],
     keywords: config.instagram?.keywords || [],
     landingUrl: config.landingUrl,
@@ -1409,8 +1428,21 @@ function defaultAdminCampaign(config) {
       startPayload: ""
     },
     telegramTexts: config.telegramTexts || {},
-    telegramMedia: {}
+    telegramMedia: {},
+    inheritDefaults: {
+      landing: true,
+      instagramMessage: true,
+      telegramFlow: true
+    }
   }, config, adminCampaigns(config).length);
+  return {
+    ...campaign,
+    _id: "",
+    telegram: {
+      ...campaign.telegram,
+      startPayload: ""
+    }
+  };
 }
 
 function adminCampaigns(config) {
@@ -1626,161 +1658,360 @@ function renderEmptyCampaignCard() {
     </article>`;
 }
 
-function renderCampaignEditor(config, campaign, existing, posts = [], mediaFiles = []) {
+function renderCampaignEditor(config, campaign, existing, posts = [], mediaFiles = [], campaigns = []) {
   const triggers = campaign.instagram?.enabledTriggers || {};
   const directMessage = campaign.instagram?.directMessage || {};
   const selectedMediaIds = new Set((campaign.mediaIds || []).map(String));
+  const inheritDefaults = campaign.inheritDefaults || {};
+  const landingMode = inheritDefaults.landing ? "default" : "custom";
+  const instagramMessageMode = inheritDefaults.instagramMessage ? "default" : "custom";
+  const telegramMode = inheritDefaults.telegramFlow ? "default" : "custom";
+  const conflictCampaigns = campaigns
+    .filter((item) => String(item._id || item.id) !== String(campaign._id || campaign.id))
+    .map((item) => ({
+      id: item._id || item.id,
+      name: item.name || item._id || item.id,
+      priority: Number(item.priority || 0),
+      mediaIds: item.mediaIds || [],
+      keywords: item.keywords || [],
+      triggers: item.instagram?.enabledTriggers || {}
+    }));
   const content = `
+    <style>
+      .wizard-shell { position: relative; }
+      .wizard-ambient { position: fixed; inset: 0; overflow: hidden; pointer-events: none; z-index: -1; }
+      .wizard-ambient::before, .wizard-ambient::after { content: ""; position: absolute; width: 38vw; height: 38vw; border-radius: 50%; filter: blur(55px); opacity: .34; }
+      .wizard-ambient::before { top: 8%; left: -10%; background: #76d7cc; }
+      .wizard-ambient::after { right: -10%; bottom: 4%; background: #9dbdff; }
+      .wizard-progress { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; padding: 10px; margin-bottom: 16px; border: 1px solid rgba(255,255,255,.78); border-radius: 24px; background: rgba(255,255,255,.46); box-shadow: 0 20px 60px rgba(31,55,88,.12); backdrop-filter: blur(30px) saturate(165%); }
+      .wizard-progress button { min-height: 62px; padding: 9px 10px; border: 0; border-radius: 17px; box-shadow: none; background: transparent; justify-content: flex-start; gap: 9px; color: var(--muted); text-align: left; }
+      .wizard-progress button[aria-current="step"] { color: var(--ink); background: rgba(255,255,255,.78); box-shadow: 0 10px 28px rgba(31,55,88,.1), inset 0 1px 0 #fff; }
+      .wizard-progress button.is-done { color: #08776d; }
+      .step-number { flex: 0 0 30px; width: 30px; height: 30px; display: grid; place-items: center; border-radius: 50%; background: rgba(255,255,255,.65); font-weight: 900; }
+      .wizard-progress button[aria-current="step"] .step-number { color: white; background: linear-gradient(135deg, var(--blue), var(--teal)); }
+      .step-label { font-size: 12px; font-weight: 850; line-height: 1.15; }
+      .wizard-step { display: none; min-height: 490px; padding: clamp(22px, 4vw, 42px); border: 1px solid rgba(255,255,255,.82); border-radius: 30px; background: linear-gradient(145deg, rgba(255,255,255,.72), rgba(255,255,255,.46)); box-shadow: 0 28px 90px rgba(29,53,87,.16), inset 0 1px 0 rgba(255,255,255,.94); backdrop-filter: blur(34px) saturate(170%); overflow: hidden; }
+      .wizard-step.is-active { display: block; animation: stepIn .32s ease both; }
+      @keyframes stepIn { from { opacity: 0; transform: translateY(8px) scale(.995); } to { opacity: 1; transform: none; } }
+      .step-kicker { margin: 0 0 8px; color: var(--teal); font-size: 12px; font-weight: 900; letter-spacing: .12em; text-transform: uppercase; }
+      .wizard-step h2 { max-width: 760px; margin: 0; font-size: clamp(25px, 4vw, 40px); line-height: 1.06; letter-spacing: -.035em; }
+      .step-copy { max-width: 720px; margin: 12px 0 26px; color: var(--muted); font-size: 16px; line-height: 1.55; }
+      .choice-grid { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 14px; }
+      .choice-grid.two { grid-template-columns: repeat(2, minmax(0,1fr)); }
+      .choice-card { position: relative; display: block; min-height: 142px; margin: 0; padding: 18px; border: 1px solid rgba(255,255,255,.78); border-radius: 22px; background: rgba(255,255,255,.46); box-shadow: inset 0 1px 0 rgba(255,255,255,.9); cursor: pointer; transition: .2s ease; }
+      .choice-card:hover { transform: translateY(-2px); background: rgba(255,255,255,.63); }
+      .choice-card:has(input:checked) { border-color: rgba(15,159,148,.46); background: linear-gradient(145deg, rgba(255,255,255,.82), rgba(211,248,241,.68)); box-shadow: 0 15px 42px rgba(15,159,148,.12), inset 0 1px 0 #fff; }
+      .choice-card input { position: absolute; top: 18px; right: 18px; width: 20px; height: 20px; accent-color: var(--teal); }
+      .choice-card strong { display: block; max-width: calc(100% - 34px); margin-bottom: 7px; font-size: 16px; }
+      .choice-card small { display: block; line-height: 1.45; font-weight: 500; }
+      .field-card { padding: 18px; border: 1px solid rgba(255,255,255,.75); border-radius: 22px; background: rgba(255,255,255,.44); }
+      .field-card + .field-card, .mode-details, .scope-box { margin-top: 14px; }
+      .mode-details { padding: 18px; border-radius: 22px; background: rgba(255,255,255,.4); border: 1px solid rgba(255,255,255,.72); }
+      .mode-details.is-hidden, .conditional.is-hidden { display: none; }
+      .scope-box { padding: 16px; border-radius: 20px; border: 1px solid rgba(255,255,255,.72); background: rgba(255,255,255,.36); }
+      .scope-head { display: flex; justify-content: space-between; gap: 14px; align-items: center; margin-bottom: 12px; }
+      .segmented { display: inline-flex; gap: 4px; padding: 4px; border-radius: 14px; background: rgba(32,58,84,.07); }
+      .segmented label { position: relative; margin: 0; padding: 8px 11px; border-radius: 11px; cursor: pointer; }
+      .segmented label:has(input:checked) { background: rgba(255,255,255,.86); box-shadow: 0 5px 16px rgba(31,55,88,.1); color: var(--ink); }
+      .segmented input { position: absolute; opacity: 0; pointer-events: none; }
+      .advanced { margin-top: 14px; }
+      .advanced summary { cursor: pointer; color: var(--muted); font-weight: 800; }
+      .advanced textarea { margin-top: 10px; }
+      .wizard-footer { position: sticky; bottom: 14px; display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 14px; padding: 12px; border: 1px solid rgba(255,255,255,.82); border-radius: 22px; background: rgba(244,249,252,.74); box-shadow: 0 18px 50px rgba(29,53,87,.16); backdrop-filter: blur(26px) saturate(160%); z-index: 5; }
+      .wizard-footer .button, .wizard-footer button { border-radius: 15px; min-width: 118px; }
+      .footer-right { display: flex; gap: 9px; margin-left: auto; }
+      .error-banner { display: none; margin-bottom: 14px; padding: 12px 15px; border-radius: 15px; color: #8a2d23; background: rgba(255,224,217,.78); border: 1px solid rgba(190,75,56,.24); }
+      .error-banner.is-visible { display: block; }
+      .review-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; }
+      .review-card { padding: 18px; border-radius: 22px; background: rgba(255,255,255,.48); border: 1px solid rgba(255,255,255,.8); }
+      .review-card span { display: block; margin-bottom: 7px; color: var(--muted); font-size: 12px; font-weight: 850; text-transform: uppercase; letter-spacing: .08em; }
+      .review-card strong { font-size: 16px; line-height: 1.45; }
+      .review-warning { margin-top: 14px; padding: 15px 17px; border-radius: 18px; background: rgba(255,239,200,.72); border: 1px solid rgba(196,146,37,.22); color: #765313; }
+      .review-warning:empty { display: none; }
+      .status-line { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 14px; padding: 16px 18px; border-radius: 20px; background: rgba(255,255,255,.46); border: 1px solid rgba(255,255,255,.78); }
+      .status-line select { max-width: 190px; }
+      .post-picker { grid-template-columns: repeat(3,minmax(0,1fr)); max-height: 330px; overflow: auto; padding: 4px; }
+      .post-option { border-radius: 17px; }
+      .post-option:has(input:checked) { border-color: rgba(15,159,148,.45); background: rgba(218,249,243,.72); }
+      .post-thumb { border-radius: 13px; }
+      .media-select-wrap { display: grid; gap: 10px; }
+      .selected-media-preview { min-height: 92px; display: grid; place-items: center; overflow: hidden; border-radius: 16px; border: 1px dashed rgba(42,74,104,.2); background: rgba(255,255,255,.38); color: var(--muted); font-size: 12px; }
+      .selected-media-preview:empty { display: none; }
+      .selected-media-preview img, .selected-media-preview video { display: block; width: 100%; height: 150px; object-fit: cover; }
+      @media (max-width: 900px) {
+        .wizard-progress { grid-template-columns: repeat(5, 1fr); }
+        .wizard-progress button { justify-content: center; min-height: 48px; }
+        .step-label { display: none; }
+        .choice-grid, .choice-grid.two, .review-grid, .post-picker { grid-template-columns: 1fr; }
+        .wizard-step { min-height: auto; border-radius: 24px; }
+        .scope-head, .status-line { align-items: flex-start; flex-direction: column; }
+        .wizard-footer { bottom: 8px; }
+      }
+    </style>
+    <div class="wizard-ambient"></div>
     <form id="campaignForm" method="post" action="${existing ? `/admin/campaigns/${encodeURIComponent(campaign._id)}` : "/admin/campaigns/new"}">
-      <section class="section">
-        <h2>Доступ</h2>
-        <div class="row">
-          <div class="field">
-            <label>ID</label>
-            <input name="id" type="text" value="${esc(campaign._id || "")}" ${existing ? "readonly" : ""}>
-            <small>Например: reels_oct_14. После создания лучше не менять.</small>
-          </div>
-          <div class="field">
-            <label>Статус</label>
-            <select name="status">
-              <option value="active" ${campaign.status !== "paused" ? "selected" : ""}>Active</option>
-              <option value="paused" ${campaign.status === "paused" ? "selected" : ""}>Paused</option>
-            </select>
-          </div>
-        </div>
-      </section>
+      <input name="id" type="hidden" value="${esc(campaign._id || "")}">
+      <input name="priority" type="hidden" value="${esc(campaign.priority || 0)}">
+      <input name="startPayload" type="hidden" value="${esc(campaign.telegram?.startPayload || "")}">
 
-      <section class="section">
-        <h2>Основное</h2>
-        <div class="row">
-          <div class="field">
-            <label>Название</label>
-            <input name="name" type="text" value="${esc(campaign.name || "")}" required>
-          </div>
-          <div class="field">
-            <label>Priority</label>
-            <input name="priority" type="number" value="${esc(campaign.priority || 0)}">
-            <small>Если несколько автоматизаций подходят, выше priority выбирается раньше.</small>
-          </div>
-          <div class="field">
-            <label>Landing URL</label>
-            <input name="landingUrl" type="text" value="${esc(campaign.landingUrl || config.landingUrl)}">
-          </div>
-        </div>
-      </section>
+      <div class="wizard-shell">
+        <nav class="wizard-progress" aria-label="Этапы настройки">
+          ${["Основное", "Триггер", "Ответ", "Telegram", "Проверка"].map((label, index) => `<button type="button" data-step-nav="${index}" ${index === 0 ? `aria-current="step"` : ""}><span class="step-number">${index + 1}</span><span class="step-label">${label}</span></button>`).join("")}
+        </nav>
+        <div id="wizardError" class="error-banner" role="alert"></div>
 
-      <section class="section">
-        <h2>Instagram trigger</h2>
-        <div class="toggles">
-          <label class="toggle">Комментарии <input name="comments" type="checkbox" ${checked(triggers.comments)}></label>
-          <label class="toggle">Direct <input name="directMessages" type="checkbox" ${checked(triggers.directMessages)}></label>
-          <label class="toggle">Share/Repost <input name="shares" type="checkbox" ${checked(triggers.shares)}></label>
-          <label class="toggle">Публичный ответ <input name="publicReplyEnabled" type="checkbox" ${checked(campaign.instagram?.publicReplyEnabled)}></label>
-        </div>
-        <div class="row" style="margin-top:14px">
-          <div class="field">
-            <label>Manual media IDs</label>
-            <textarea id="mediaIdsInput" name="mediaIds">${esc((campaign.mediaIds || []).join("\n"))}</textarea>
-            <small>Можно оставить пустым, если выбрал посты ниже. Пусто = любой пост.</small>
+        <section class="wizard-step is-active" data-step="0">
+          <p class="step-kicker">Шаг 1 из 5</p>
+          <h2>Дайте автоматизации понятное имя</h2>
+          <p class="step-copy">Оно видно только вам. ID и техническая ссылка Telegram создадутся автоматически.</p>
+          <div class="field-card">
+            <label for="campaignName">Название автоматизации</label>
+            <input id="campaignName" name="name" type="text" value="${esc(campaign.name || "")}" placeholder="Например, Урок по халал-инвестициям" required autofocus>
           </div>
-          <div class="field">
-            <label>Keywords</label>
-            <textarea name="keywords">${esc((campaign.keywords || []).join(", "))}</textarea>
-            <small>Через запятую. Пусто = любой комментарий.</small>
+          <div style="margin-top:22px">
+            <label>Куда вести подписчика после проверки?</label>
+            <div class="choice-grid two">
+              <label class="choice-card">
+                <input type="radio" name="landingMode" value="default" ${checked(landingMode === "default")}>
+                <strong>Стандартный лендинг</strong>
+                <small>Использовать адрес из общих настроек. Рекомендуется.</small>
+              </label>
+              <label class="choice-card">
+                <input type="radio" name="landingMode" value="custom" ${checked(landingMode === "custom")}>
+                <strong>Другой лендинг</strong>
+                <small>Указать отдельную ссылку только для этой автоматизации.</small>
+              </label>
+            </div>
+            <div id="landingDetails" class="mode-details ${landingMode === "custom" ? "" : "is-hidden"}">
+              <label for="landingUrl">Ссылка на лендинг</label>
+              <input id="landingUrl" name="landingUrl" type="text" value="${esc(campaign.landingUrl || config.landingUrl)}" placeholder="https://example.com/lesson">
+            </div>
           </div>
-          <div class="field">
-            <label>Direct image</label>
-            ${renderMediaSelect("directImageId", campaign.instagram?.directMedia?.imageId || "", mediaFiles, "Без картинки", "image/")}
-            <small>Файлы берутся из Media library.</small>
-          </div>
-        </div>
-        ${renderPostPicker(posts, selectedMediaIds)}
-      </section>
+        </section>
 
-      <section class="section">
-        <h2>Instagram message</h2>
-        <div class="row">
-          <div class="field">
-            <label>Текст Direct</label>
-            <textarea name="directText">${esc(directMessage.text || "")}</textarea>
+        <section class="wizard-step" data-step="1">
+          <p class="step-kicker">Шаг 2 из 5</p>
+          <h2>Выберите, что запускает сценарий</h2>
+          <p class="step-copy">Можно включить несколько событий. Хотя бы одно событие обязательно.</p>
+          <div class="choice-grid">
+            <label class="choice-card"><input name="comments" type="checkbox" ${checked(triggers.comments)}><strong>Комментарий</strong><small>Ответить человеку, который оставил комментарий под публикацией.</small></label>
+            <label class="choice-card"><input name="directMessages" type="checkbox" ${checked(triggers.directMessages)}><strong>Сообщение в Direct</strong><small>Запустить сценарий по входящему сообщению с нужным словом.</small></label>
+            <label class="choice-card"><input name="shares" type="checkbox" ${checked(triggers.shares)}><strong>Share / Repost</strong><small>Запустить сценарий, когда публикацией поделились.</small></label>
           </div>
-          <div class="field">
-            <label>Текст кнопки</label>
-            <input name="directButtonText" type="text" value="${esc(directMessage.buttonText || "")}">
-          </div>
-          <div class="field">
-            <label>Публичный ответ</label>
-            <input name="publicCommentReply" type="text" value="${esc(campaign.instagram?.publicCommentReply || "")}">
-          </div>
-        </div>
-      </section>
 
-      <section class="section">
-        <h2>Telegram route</h2>
-        <div class="row">
-          <div class="field">
-            <label>Канал для проверки</label>
-            <input name="channelUsername" type="text" value="${esc(campaign.telegram?.channelUsername || config.telegram?.channelUsername || "")}">
+          <div class="scope-box">
+            <div class="scope-head"><div><strong>Какие публикации?</strong><br><small>Пустой выбор больше не означает что-то случайное.</small></div>
+              <div class="segmented"><label><input type="radio" name="postScope" value="any" ${checked(!selectedMediaIds.size)}>Все</label><label><input type="radio" name="postScope" value="selected" ${checked(Boolean(selectedMediaIds.size))}>Выбранные</label></div>
+            </div>
+            <div id="postPickerDetails" class="conditional ${selectedMediaIds.size ? "" : "is-hidden"}">${renderPostPicker(posts, selectedMediaIds)}</div>
+            <details class="advanced"><summary>Ввести ID публикаций вручную</summary><textarea id="mediaIdsInput" name="mediaIds" placeholder="Один ID в строке">${esc((campaign.mediaIds || []).join("\n"))}</textarea></details>
           </div>
-          <div class="field">
-            <label>Start payload</label>
-            <input name="startPayload" type="text" value="${esc(campaign.telegram?.startPayload || "")}">
-            <small>Один общий бот, разные автоматизации через payload.</small>
-          </div>
-          <div class="field">
-            <label>Subscribed photo media ID</label>
-            ${renderMediaSelect("subscribedPhotoId", campaign.telegramMedia?.subscribedPhotoId || "", mediaFiles, "Без фото", "image/")}
-          </div>
-        </div>
-      </section>
 
-      <section class="section">
-        <h2>Telegram texts</h2>
-        <div class="row">
-          <div class="field">
-            <label>Приветствие</label>
-            <textarea name="tgWelcome">${esc(campaign.telegramTexts?.welcome || "")}</textarea>
+          <div class="scope-box">
+            <div class="scope-head"><div><strong>Какие слова?</strong><br><small>Для Share / Repost слова не проверяются.</small></div>
+              <div class="segmented"><label><input type="radio" name="keywordScope" value="any" ${checked(!(campaign.keywords || []).length)}>Любые</label><label><input type="radio" name="keywordScope" value="selected" ${checked(Boolean((campaign.keywords || []).length))}>По списку</label></div>
+            </div>
+            <div id="keywordDetails" class="conditional ${(campaign.keywords || []).length ? "" : "is-hidden"}">
+              <label for="keywordsInput">Ключевые слова</label>
+              <textarea id="keywordsInput" name="keywords" placeholder="Например: урок, хочу, инвестиции">${esc((campaign.keywords || []).join(", "))}</textarea>
+              <small>Разделяйте слова запятыми.</small>
+            </div>
           </div>
-          <div class="field">
-            <label>Если не подписан</label>
-            <textarea name="tgNotSubscribed">${esc(campaign.telegramTexts?.notSubscribed || "")}</textarea>
-          </div>
-          <div class="field">
-            <label>Если подписан</label>
-            <textarea name="tgSubscribed">${esc(campaign.telegramTexts?.subscribed || "")}</textarea>
-          </div>
-        </div>
-        <div class="row" style="margin-top:14px">
-          <div class="field">
-            <label>Welcome photo 1 media ID</label>
-            ${renderMediaSelect("welcomePhoto1Id", campaign.telegramMedia?.welcomePhoto1Id || "", mediaFiles, "Без фото", "image/")}
-          </div>
-          <div class="field">
-            <label>Circle video media ID</label>
-            ${renderMediaSelect("welcomeCircleVideoId", campaign.telegramMedia?.welcomeCircleVideoId || "", mediaFiles, "Без видео", "video/")}
-          </div>
-          <div class="field">
-            <label>Welcome photo 2 media ID</label>
-            ${renderMediaSelect("welcomePhoto2Id", campaign.telegramMedia?.welcomePhoto2Id || "", mediaFiles, "Без фото", "image/")}
-          </div>
-        </div>
-      </section>
+        </section>
 
-      <div class="actions">
-        <div class="meta">
-          <a class="button" href="/admin/campaigns">Назад</a>
+        <section class="wizard-step" data-step="2">
+          <p class="step-kicker">Шаг 3 из 5</p>
+          <h2>Настройте ответ в Instagram</h2>
+          <p class="step-copy">Стандартный ответ уже готов. Меняйте его только если этой кампании нужен отдельный текст или изображение.</p>
+          <div class="choice-grid two">
+            <label class="choice-card"><input type="radio" name="instagramMessageMode" value="default" ${checked(instagramMessageMode === "default")}><strong>Стандартный ответ</strong><small>Текст, кнопка и изображение берутся из общих настроек.</small></label>
+            <label class="choice-card"><input type="radio" name="instagramMessageMode" value="custom" ${checked(instagramMessageMode === "custom")}><strong>Свой ответ</strong><small>Отдельное сообщение только для этой автоматизации.</small></label>
+          </div>
+          <div id="instagramDetails" class="mode-details ${instagramMessageMode === "custom" ? "" : "is-hidden"}">
+            <div class="row">
+              <div class="field"><label>Текст сообщения в Direct</label><textarea name="directText">${esc(directMessage.text || "")}</textarea></div>
+              <div class="field"><label>Текст кнопки</label><input name="directButtonText" type="text" value="${esc(directMessage.buttonText || "")}"></div>
+              <div class="field"><label>Изображение</label>${renderMediaSelect("directImageId", campaign.instagram?.directMedia?.imageId || "", mediaFiles, "Без картинки", "image/")}</div>
+            </div>
+            <div id="publicReplyBlock" class="status-line conditional ${triggers.comments ? "" : "is-hidden"}">
+              <label class="toggle" style="margin:0">Публично ответить на комментарий <input name="publicReplyEnabled" type="checkbox" ${checked(campaign.instagram?.publicReplyEnabled)}></label>
+              <div class="field" style="flex:1"><label>Текст публичного ответа</label><input name="publicCommentReply" type="text" value="${esc(campaign.instagram?.publicCommentReply || "")}"></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="wizard-step" data-step="3">
+          <p class="step-kicker">Шаг 4 из 5</p>
+          <h2>Выберите сценарий в Telegram</h2>
+          <p class="step-copy">В большинстве случаев достаточно стандартного сценария — тексты, канал и медиа подтянутся автоматически.</p>
+          <div class="choice-grid two">
+            <label class="choice-card"><input type="radio" name="telegramMode" value="default" ${checked(telegramMode === "default")}><strong>Стандартный сценарий</strong><small>Использовать текущие общие настройки Telegram.</small></label>
+            <label class="choice-card"><input type="radio" name="telegramMode" value="custom" ${checked(telegramMode === "custom")}><strong>Настроить отдельно</strong><small>Задать свой канал, тексты и медиа.</small></label>
+          </div>
+          <div id="telegramDetails" class="mode-details ${telegramMode === "custom" ? "" : "is-hidden"}">
+            <div class="row">
+              <div class="field"><label>Канал для проверки</label><input name="channelUsername" type="text" value="${esc(campaign.telegram?.channelUsername || config.telegram?.channelUsername || "")}"></div>
+              <div class="field"><label>Приветствие</label><textarea name="tgWelcome">${esc(campaign.telegramTexts?.welcome || "")}</textarea></div>
+              <div class="field"><label>Если не подписан</label><textarea name="tgNotSubscribed">${esc(campaign.telegramTexts?.notSubscribed || "")}</textarea></div>
+              <div class="field"><label>Если подписан</label><textarea name="tgSubscribed">${esc(campaign.telegramTexts?.subscribed || "")}</textarea></div>
+            </div>
+            <div class="row" style="margin-top:14px">
+              <div class="field"><label>Первое фото</label>${renderMediaSelect("welcomePhoto1Id", campaign.telegramMedia?.welcomePhoto1Id || "", mediaFiles, "Без фото", "image/")}</div>
+              <div class="field"><label>Круглое видео</label>${renderMediaSelect("welcomeCircleVideoId", campaign.telegramMedia?.welcomeCircleVideoId || "", mediaFiles, "Без видео", "video/")}</div>
+              <div class="field"><label>Второе фото</label>${renderMediaSelect("welcomePhoto2Id", campaign.telegramMedia?.welcomePhoto2Id || "", mediaFiles, "Без фото", "image/")}</div>
+              <div class="field"><label>Фото после подписки</label>${renderMediaSelect("subscribedPhotoId", campaign.telegramMedia?.subscribedPhotoId || "", mediaFiles, "Без фото", "image/")}</div>
+            </div>
+          </div>
+        </section>
+
+        <section class="wizard-step" data-step="4">
+          <p class="step-kicker">Шаг 5 из 5</p>
+          <h2>Проверьте перед сохранением</h2>
+          <p class="step-copy">Сводка показывает сценарий обычными словами. Вернитесь на нужный шаг, если что-то хочется изменить.</p>
+          <div class="review-grid">
+            <div class="review-card"><span>Название</span><strong id="reviewName">—</strong></div>
+            <div class="review-card"><span>Запускается по</span><strong id="reviewTriggers">—</strong></div>
+            <div class="review-card"><span>Охват</span><strong id="reviewScope">—</strong></div>
+            <div class="review-card"><span>Ответ Instagram</span><strong id="reviewInstagram">—</strong></div>
+            <div class="review-card"><span>Telegram</span><strong id="reviewTelegram">—</strong></div>
+            <div class="review-card"><span>Переход</span><strong id="reviewLanding">—</strong></div>
+          </div>
+          <div id="reviewWarning" class="review-warning"></div>
+          <div class="status-line"><div><strong>Статус после сохранения</strong><br><small>${existing ? "Можно временно приостановить автоматизацию." : "Новая автоматизация сразу начнет работать."}</small></div><select name="status"><option value="active" ${campaign.status !== "paused" ? "selected" : ""}>Активна</option><option value="paused" ${campaign.status === "paused" ? "selected" : ""}>На паузе</option></select></div>
+        </section>
+
+        <div class="wizard-footer">
+          <a class="button" href="/admin/campaigns">Выйти</a>
           ${existing ? `<button class="danger" type="submit" formaction="/admin/campaigns/${encodeURIComponent(campaign._id)}/delete" formmethod="post" onclick="return confirm('Удалить эту автоматизацию? Это действие нельзя отменить.')">Удалить</button>` : ""}
+          <div class="footer-right"><button id="prevStep" type="button">Назад</button><button id="nextStep" class="primary" type="button">Продолжить</button><button id="saveCampaign" class="primary" type="submit" hidden>${existing ? "Сохранить" : "Запустить автоматизацию"}</button></div>
         </div>
-        <button class="primary" type="submit">Сохранить автоматизацию</button>
       </div>
     </form>
     <script>
       const form = document.getElementById("campaignForm");
       const mediaIdsInput = document.getElementById("mediaIdsInput");
-      form.addEventListener("submit", () => {
-        const checked = Array.from(document.querySelectorAll("[data-post-id]:checked")).map((item) => item.value);
-        if (checked.length) mediaIdsInput.value = checked.join("\\n");
+      const steps = Array.from(document.querySelectorAll("[data-step]"));
+      const navButtons = Array.from(document.querySelectorAll("[data-step-nav]"));
+      const prevButton = document.getElementById("prevStep");
+      const nextButton = document.getElementById("nextStep");
+      const saveButton = document.getElementById("saveCampaign");
+      const errorBanner = document.getElementById("wizardError");
+      const otherCampaigns = ${scriptJson(conflictCampaigns)};
+      let currentStep = 0;
+
+      function selectedValue(name) {
+        const input = form.querySelector('[name="' + name + '"]:checked');
+        return input ? input.value : "";
+      }
+      function toggleDetails(name, value, targetId) {
+        document.getElementById(targetId).classList.toggle("is-hidden", selectedValue(name) !== value);
+      }
+      function syncConditionalUi() {
+        toggleDetails("landingMode", "custom", "landingDetails");
+        toggleDetails("instagramMessageMode", "custom", "instagramDetails");
+        toggleDetails("telegramMode", "custom", "telegramDetails");
+        toggleDetails("postScope", "selected", "postPickerDetails");
+        toggleDetails("keywordScope", "selected", "keywordDetails");
+        document.getElementById("publicReplyBlock").classList.toggle("is-hidden", !form.elements.comments.checked);
+      }
+      function syncMediaIds() {
+        if (selectedValue("postScope") === "any") {
+          mediaIdsInput.value = "";
+          return;
+        }
+        const selectedPosts = Array.from(document.querySelectorAll("[data-post-id]:checked")).map((item) => item.value);
+        if (selectedPosts.length) mediaIdsInput.value = selectedPosts.join("\\n");
+      }
+      function valuesList(value) {
+        return String(value || "").split(/[\\n,]/).map((item) => item.trim()).filter(Boolean);
+      }
+      function showError(message) {
+        errorBanner.textContent = message;
+        errorBanner.classList.add("is-visible");
+        errorBanner.scrollIntoView({ behavior: "smooth", block: "center" });
+      }
+      function clearError() { errorBanner.classList.remove("is-visible"); errorBanner.textContent = ""; }
+      function validateStep(index) {
+        clearError();
+        if (index === 0 && !form.elements.name.value.trim()) { showError("Введите название автоматизации."); form.elements.name.focus(); return false; }
+        if (index === 0 && selectedValue("landingMode") === "custom" && !form.elements.landingUrl.value.trim()) { showError("Укажите ссылку на лендинг."); form.elements.landingUrl.focus(); return false; }
+        if (index === 1) {
+          if (!form.elements.comments.checked && !form.elements.directMessages.checked && !form.elements.shares.checked) { showError("Выберите хотя бы одно событие: комментарий, Direct или Share / Repost."); return false; }
+          syncMediaIds();
+          if (selectedValue("postScope") === "selected" && !valuesList(mediaIdsInput.value).length) { showError("Выберите хотя бы одну публикацию или введите её ID вручную."); return false; }
+          if (selectedValue("keywordScope") === "selected" && !valuesList(form.elements.keywords.value).length) { showError("Добавьте хотя бы одно ключевое слово."); form.elements.keywords.focus(); return false; }
+        }
+        return true;
+      }
+      function updateReview() {
+        syncMediaIds();
+        const triggerLabels = [];
+        if (form.elements.comments.checked) triggerLabels.push("комментарию");
+        if (form.elements.directMessages.checked) triggerLabels.push("сообщению в Direct");
+        if (form.elements.shares.checked) triggerLabels.push("Share / Repost");
+        const media = valuesList(mediaIdsInput.value);
+        const keywords = selectedValue("keywordScope") === "any" ? [] : valuesList(form.elements.keywords.value);
+        document.getElementById("reviewName").textContent = form.elements.name.value.trim() || "Без названия";
+        document.getElementById("reviewTriggers").textContent = triggerLabels.join(", ") || "Не выбрано";
+        document.getElementById("reviewScope").textContent = (media.length ? media.length + " выбранных публикаций" : "все публикации") + "; " + (keywords.length ? keywords.length + " ключевых слов" : "любой текст");
+        document.getElementById("reviewInstagram").textContent = selectedValue("instagramMessageMode") === "default" ? "стандартный ответ" : "собственный ответ";
+        document.getElementById("reviewTelegram").textContent = selectedValue("telegramMode") === "default" ? "стандартный сценарий" : "индивидуальный сценарий";
+        document.getElementById("reviewLanding").textContent = selectedValue("landingMode") === "default" ? "стандартный лендинг" : form.elements.landingUrl.value.trim();
+        const warnings = [];
+        if (!media.length) warnings.push("Автоматизация реагирует на все публикации.");
+        if (!keywords.length && (form.elements.comments.checked || form.elements.directMessages.checked)) warnings.push("Она реагирует на любой текст.");
+        const triggerKeys = ["comments", "directMessages", "shares"].filter((key) => form.elements[key].checked);
+        const overlaps = otherCampaigns.filter((campaign) => triggerKeys.some((key) => campaign.triggers && campaign.triggers[key]) && (!media.length || !campaign.mediaIds.length || campaign.mediaIds.some((id) => media.includes(String(id)))) && (!keywords.length || !campaign.keywords.length || campaign.keywords.some((word) => keywords.map((item) => item.toLowerCase()).includes(String(word).toLowerCase()))));
+        if (overlaps.length) warnings.push("Возможное пересечение с: " + overlaps.slice(0, 3).map((item) => item.name).join(", ") + ". Сработает автоматизация с более высоким приоритетом.");
+        document.getElementById("reviewWarning").textContent = warnings.join(" ");
+      }
+      function showStep(index) {
+        currentStep = Math.max(0, Math.min(index, steps.length - 1));
+        steps.forEach((step, stepIndex) => step.classList.toggle("is-active", stepIndex === currentStep));
+        navButtons.forEach((button, stepIndex) => {
+          button.toggleAttribute("aria-current", stepIndex === currentStep);
+          if (stepIndex === currentStep) button.setAttribute("aria-current", "step");
+          button.classList.toggle("is-done", stepIndex < currentStep);
+        });
+        prevButton.hidden = currentStep === 0;
+        nextButton.hidden = currentStep === steps.length - 1;
+        saveButton.hidden = currentStep !== steps.length - 1;
+        if (currentStep === steps.length - 1) updateReview();
+        clearError();
+        document.querySelector(".wizard-progress").scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+      form.addEventListener("change", syncConditionalUi);
+      form.querySelectorAll("[data-media-select]").forEach((select) => {
+        const preview = select.parentElement.querySelector("[data-media-preview]");
+        const updateMediaPreview = () => {
+          const option = select.selectedOptions[0];
+          const url = option ? option.dataset.preview || "" : "";
+          const type = option ? option.dataset.type || "" : "";
+          preview.replaceChildren();
+          if (!url) return;
+          const media = document.createElement(type.startsWith("video/") ? "video" : "img");
+          media.src = url;
+          media.alt = "Выбранный медиафайл";
+          if (media.tagName === "VIDEO") { media.muted = true; media.controls = true; media.preload = "metadata"; }
+          preview.append(media);
+        };
+        select.addEventListener("change", updateMediaPreview);
+        updateMediaPreview();
       });
+      prevButton.addEventListener("click", () => showStep(currentStep - 1));
+      nextButton.addEventListener("click", () => { if (validateStep(currentStep)) showStep(currentStep + 1); });
+      navButtons.forEach((button, index) => button.addEventListener("click", () => {
+        if (index <= currentStep) showStep(index);
+        else if (index === currentStep + 1 && validateStep(currentStep)) showStep(index);
+      }));
+      form.addEventListener("submit", (event) => {
+        if (event.submitter && event.submitter.classList.contains("danger")) return;
+        for (let index = 0; index < steps.length - 1; index += 1) { if (!validateStep(index)) { event.preventDefault(); showStep(index); return; } }
+        syncMediaIds();
+        if (selectedValue("keywordScope") === "any") form.elements.keywords.value = "";
+      });
+      syncConditionalUi();
+      showStep(0);
     </script>`;
   return renderAdminShell(existing ? "Редактировать автоматизацию" : "Новая автоматизация", config, content);
 }
@@ -1828,15 +2059,18 @@ function renderMediaSelect(name, selectedId, files, emptyLabel, contentPrefix) {
     ? `<option value="${esc(selectedId)}" selected>${esc(`Current: ${selectedId}`)}</option>`
     : "";
   const options = filtered
-    .map((file) => `<option value="${esc(file.id)}" ${file.id === selectedId ? "selected" : ""}>${esc(mediaOptionLabel(file))}</option>`)
+    .map((file) => `<option value="${esc(file.id)}" data-preview="${esc(mediaAdminUrl(file.id))}" data-type="${esc(file.contentType || "")}" ${file.id === selectedId ? "selected" : ""}>${esc(mediaOptionLabel(file))}</option>`)
     .join("");
 
   return `
-    <select name="${esc(name)}">
-      <option value="">${esc(emptyLabel)}</option>
-      ${customOption}
-      ${options}
-    </select>`;
+    <div class="media-select-wrap">
+      <select name="${esc(name)}" data-media-select>
+        <option value="">${esc(emptyLabel)}</option>
+        ${customOption}
+        ${options}
+      </select>
+      <div class="selected-media-preview" data-media-preview></div>
+    </div>`;
 }
 
 function mediaOptionLabel(file) {
