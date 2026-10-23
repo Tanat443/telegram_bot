@@ -1,6 +1,9 @@
 import { hasInstagramRecipient, markEventOnce, markInstagramRecipientOnce, recordEvent } from "./db.js";
 import { mergeConfigWithCampaign, readCampaigns } from "./config.js";
 
+const WHATSAPP_NUMBER = "77065130979";
+const WHATSAPP_MESSAGE = "Сәлеметсіз бе? Жеке кеңеске жазылғым келеді.";
+
 export class MetaClient {
   constructor({ accessToken, apiVersion, graphBaseUrl, publicBaseUrl, configProvider, telegramBot }) {
     this.accessToken = accessToken;
@@ -207,6 +210,7 @@ export class MetaClient {
 
   instagramMessagePayload(config) {
     const imageId = config.instagram.directMedia?.imageId;
+    const button = this.directButton(config);
     if (imageId && this.publicBaseUrl) {
       return {
         attachment: {
@@ -218,8 +222,8 @@ export class MetaClient {
               image_url: `${this.publicBaseUrl}/media/${imageId}`,
               buttons: [{
                 type: "web_url",
-                title: config.instagram.directMessage.buttonText,
-                url: this.telegramBot.getStartUrl(config.telegram.startPayload)
+                title: button.title,
+                url: button.url
               }]
             }]
           }
@@ -231,6 +235,7 @@ export class MetaClient {
   }
 
   instagramButtonMessage(config) {
+    const button = this.directButton(config);
     return {
       attachment: {
         type: "template",
@@ -239,11 +244,26 @@ export class MetaClient {
           text: config.instagram.directMessage.text,
           buttons: [{
             type: "web_url",
-            title: config.instagram.directMessage.buttonText,
-            url: this.telegramBot.getStartUrl(config.telegram.startPayload)
+            title: button.title,
+            url: button.url
           }]
         }
       }
+    };
+  }
+
+  directButton(config) {
+    const destination = String(process.env.DIRECT_DESTINATION || "whatsapp").trim().toLowerCase();
+    if (destination === "whatsapp") {
+      return {
+        title: "Жазылу",
+        url: `https://wa.me/${WHATSAPP_NUMBER}?text=${encodeURIComponent(WHATSAPP_MESSAGE)}`
+      };
+    }
+
+    return {
+      title: config.instagram.directMessage.buttonText,
+      url: this.telegramBot.getStartUrl(config.telegram.startPayload)
     };
   }
 

@@ -52,6 +52,7 @@ Verify token должен совпадать с `META_VERIFY_TOKEN`.
 - `META_ACCESS_TOKEN`
 - `META_API_VERSION`
 - `META_GRAPH_BASE_URL`
+- `DIRECT_DESTINATION` (`whatsapp` временно, `telegram` для возврата старой воронки)
 - `MONGODB_URI`
 - `MONGODB_DB`
 
