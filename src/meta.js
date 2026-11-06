@@ -256,8 +256,9 @@ export class MetaClient {
     const destination = String(process.env.DIRECT_DESTINATION || "whatsapp").trim().toLowerCase();
     if (destination === "whatsapp") {
       return {
-        title: "Жазылу",
-        url: `https://wa.me/${WHATSAPP_NUMBER}?text=${encodeURIComponent(WHATSAPP_MESSAGE)}`
+        title: "Заявка қалдыру",
+        // url: `https://wa.me/${WHATSAPP_NUMBER}?text=${encodeURIComponent(WHATSAPP_MESSAGE)}`
+        url: `https://forms.gle/sEiZppLCqmkKasGp6`
       };
     }
 
