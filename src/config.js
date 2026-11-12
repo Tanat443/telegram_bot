@@ -168,6 +168,7 @@ export function mergeConfigWithCampaign(config, campaign) {
         ...normalizedCampaign.instagram.enabledTriggers
       },
       keywords: normalizedCampaign.keywords,
+      recipientDedupeEnabled: normalizedCampaign.instagram.recipientDedupeEnabled,
       publicReplyEnabled: normalizedCampaign.instagram.publicReplyEnabled,
       publicCommentReply: normalizedCampaign.instagram.publicCommentReply,
       directMessage: {
@@ -245,6 +246,7 @@ function normalizeCampaign(campaign, config) {
         directMessages: instagram.directMessages ?? instagram.enabledTriggers?.directMessages ?? instagram.triggers?.directMessages ?? config.instagram?.enabledTriggers?.directMessages ?? false,
         shares: instagram.shares ?? instagram.enabledTriggers?.shares ?? instagram.triggers?.shares ?? config.instagram?.enabledTriggers?.shares ?? false
       },
+      recipientDedupeEnabled: instagram.recipientDedupeEnabled ?? config.instagram?.recipientDedupeEnabled ?? true,
       publicReplyEnabled: useDefaultInstagramMessage
         ? config.instagram?.publicReplyEnabled ?? false
         : instagram.publicReplyEnabled ?? config.instagram?.publicReplyEnabled ?? false,

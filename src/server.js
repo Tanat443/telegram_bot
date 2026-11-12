@@ -4,7 +4,7 @@ import Busboy from "busboy";
 import sharp from "sharp";
 import { URL } from "node:url";
 import { getEnv, loadDotEnv, normalizeUrl, readCampaigns, readConfig, readConfigForCampaignId, writeConfig } from "./config.js";
-import { clearStats, getMediaFile, getStats, hasMongo, listInstagramMedia, listMediaFiles, recordEvent, saveConsultationLead, saveMediaFile, upsertInstagramMedia } from "./db.js";
+import { clearInstagramRecipients, clearStats, getMediaFile, getStats, hasMongo, listInstagramMedia, listInstagramRecipients, listMediaFiles, recordEvent, saveConsultationLead, saveMediaFile, upsertInstagramMedia } from "./db.js";
 import { renderLessonPage } from "./lesson.js";
 import { MetaClient } from "./meta.js";
 import { TelegramBot } from "./telegram.js";
@@ -145,6 +145,14 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "GET" && url.pathname === "/stats") {
       return handleStats(req, url, res);
+    }
+
+    if (req.method === "GET" && url.pathname === "/stats/recipients.csv") {
+      return handleRecipientsCsv(req, url, res);
+    }
+
+    if (url.pathname === "/stats/recipients/clear") {
+      return handleClearRecipients(req, res);
     }
 
     if (url.pathname === "/stats/clear") {
@@ -736,8 +744,9 @@ async function handleStats(req, url, res) {
   }
 
   const filters = statsFilters(url.searchParams);
-  const [stats, config, media] = await Promise.all([
+  const [stats, recipients, config, media] = await Promise.all([
     getStats(filters),
+    listInstagramRecipients(filters, 200),
     readConfig(),
     listInstagramMedia(200)
   ]);
@@ -755,7 +764,56 @@ async function handleStats(req, url, res) {
     return sendJson(res, 200, { ok: true, filters, stats });
   }
 
-  return sendHtml(res, renderStats(stats, filters, { campaigns, media: mediaOptions }));
+  return sendHtml(res, renderStats(stats, filters, { campaigns, media: mediaOptions, recipients }));
+}
+
+async function handleRecipientsCsv(req, url, res) {
+  if (!requireAdmin(req, res, `${url.pathname}${url.search}`)) return;
+  if (!hasMongo()) return sendJson(res, 400, { error: "MONGODB_URI is not configured" });
+
+  const filters = statsFilters(url.searchParams);
+  const recipients = await listInstagramRecipients(filters, 100000);
+  const rows = [
+    ["createdAt", "instagramUserId", "campaignId", "campaignName", "mediaId", "source", "firstCommentId"],
+    ...recipients.map((recipient) => [
+      recipient.createdAt,
+      recipient.instagramUserId,
+      recipient.campaignId,
+      recipient.campaignName,
+      recipient.mediaId,
+      recipient.source,
+      recipient.firstCommentId
+    ])
+  ];
+  const csv = rows.map((row) => row.map(csvCell).join(",")).join("\r\n");
+  const date = new Date().toISOString().slice(0, 10);
+  res.writeHead(200, {
+    "content-type": "text/csv; charset=utf-8",
+    "content-disposition": `attachment; filename="instagram-recipients-${date}.csv"`,
+    "cache-control": "no-store"
+  });
+  res.end(`\uFEFF${csv}`);
+}
+
+async function handleClearRecipients(req, res) {
+  if (!requireAdmin(req, res, "/stats")) return;
+  if (req.method !== "POST") return sendJson(res, 405, { error: "Method not allowed" });
+  if (!hasMongo()) return sendHtml(res, renderMessage("MONGODB_URI не настроен", "/stats"), 400);
+
+  const form = await readForm(req);
+  if (form.confirm !== "clear-recipients") {
+    return sendHtml(res, renderMessage("Очистка списка пользователей не подтверждена", "/stats"), 400);
+  }
+
+  const params = new URLSearchParams();
+  for (const name of ["campaign", "media", "from", "to"]) {
+    if (form[name]) params.set(name, form[name]);
+  }
+  const filters = statsFilters(params);
+  const deletedCount = await clearInstagramRecipients(filters);
+  const returnQuery = statsFilterQuery(filters);
+  const returnUrl = returnQuery ? `/stats?${returnQuery}` : "/stats";
+  return sendHtml(res, renderMessage(`Удалено пользователей из фильтра повторов: ${deletedCount}`, returnUrl));
 }
 
 async function handleClearStats(req, res) {
@@ -826,6 +884,12 @@ function cleanFilter(value) {
   return String(value || "").trim().slice(0, 200);
 }
 
+function csvCell(value) {
+  let text = String(value ?? "");
+  if (/^[=+\-@]/.test(text)) text = `'${text}`;
+  return `"${text.replaceAll('"', '""')}"`;
+}
+
 function parseStatsDate(value, endOfDay) {
   const normalized = cleanFilter(value);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(normalized)) return null;
@@ -857,8 +921,10 @@ function renderStats(stats, filters = {}, options = {}) {
   const byCampaign = Array.isArray(stats.byCampaign) ? stats.byCampaign : [];
   const campaigns = Array.isArray(options.campaigns) ? options.campaigns : [];
   const media = Array.isArray(options.media) ? options.media : [];
+  const recipients = Array.isArray(options.recipients) ? options.recipients : [];
   const eventTypes = Array.isArray(stats.availableEventTypes) ? stats.availableEventTypes : [];
   const jsonQuery = statsFilterQuery(filters, { format: "json" });
+  const recipientsQuery = statsFilterQuery({ ...filters, eventType: "" });
 
   return `<!doctype html>
 <html lang="ru">
@@ -929,11 +995,16 @@ function renderStats(stats, filters = {}, options = {}) {
     .filters { display: grid; grid-template-columns: 1.2fr 1.4fr repeat(3, minmax(130px, .8fr)) auto; gap: 10px; align-items: end; margin-bottom: 14px; }
     .field label { display: block; color: var(--muted); font-size: 12px; font-weight: 800; margin-bottom: 6px; }
     .field select, .field input { width: 100%; border: 1px solid rgba(42,74,104,.18); border-radius: 8px; background: rgba(255,255,255,.72); color: var(--ink); padding: 10px; font: inherit; }
-    .button { border: 0; border-radius: 8px; background: linear-gradient(135deg, var(--blue), var(--teal)); color: white; padding: 11px 16px; font: inherit; font-weight: 800; cursor: pointer; }
+    .button { border: 0; border-radius: 8px; background: linear-gradient(135deg, var(--blue), var(--teal)); color: white; padding: 11px 16px; font: inherit; font-weight: 800; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; text-decoration: none; }
     .button.danger { background: linear-gradient(135deg, #b83232, #d96b4b); }
+    .button.secondary { background: rgba(255,255,255,.72); color: var(--ink); border: 1px solid rgba(42,74,104,.14); }
     .reset { display: inline-block; color: var(--muted); font-size: 13px; padding: 10px 0; }
     .clear-row { display: flex; justify-content: space-between; align-items: center; gap: 14px; margin-bottom: 14px; }
     .clear-row form { margin: 0; }
+    .recipient-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 14px; }
+    .recipient-head h2 { margin-bottom: 5px; }
+    .recipient-actions { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+    .recipient-actions form { margin: 0; }
     .funnel { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 10px; }
     .step {
       border: 1px solid rgba(255,255,255,.62);
@@ -971,6 +1042,7 @@ function renderStats(stats, filters = {}, options = {}) {
       .nav { justify-content: flex-start; margin-top: 14px; }
       .grid, .layout, .funnel, .filters { grid-template-columns: 1fr; }
       .clear-row { display: grid; }
+      .recipient-head { display: grid; }
       .bar-row { grid-template-columns: 1fr; gap: 6px; }
       .bar-count { text-align: left; }
     }
@@ -1057,6 +1129,29 @@ function renderStats(stats, filters = {}, options = {}) {
   </section>
 
   <section class="panel" style="margin-bottom:14px">
+    <div class="recipient-head">
+      <div>
+        <h2>Пользователи в фильтре повторов</h2>
+        <div class="subtitle">Показаны последние ${recipients.length} из ${Number(stats.instagramRecipients || 0)} записей. Фильтры кампании, Reels и даты применяются к списку.</div>
+      </div>
+      <div class="recipient-actions">
+        <a class="button secondary" href="/stats/recipients.csv${recipientsQuery ? `?${esc(recipientsQuery)}` : ""}">Скачать CSV</a>
+        <form method="post" action="/stats/recipients/clear" onsubmit="return confirm('Удалить пользователей из фильтра повторов по текущим фильтрам? Без фильтров будут удалены все записи. Это действие нельзя отменить.')">
+          <input type="hidden" name="confirm" value="clear-recipients">
+          ${recipientFilterHiddenInputs(filters)}
+          <button class="button danger" type="submit">Очистить список</button>
+        </form>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Дата</th><th>Instagram ID</th><th>Кампания</th><th>Reels / media</th><th>Источник</th><th>Comment ID</th></tr></thead>
+        <tbody>${recipients.length ? recipients.map(renderRecipientRow).join("") : `<tr><td colspan="6">Список пуст.</td></tr>`}</tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="panel" style="margin-bottom:14px">
     <h2>Кампании</h2>
     <div class="table-wrap">
       <table>
@@ -1119,6 +1214,30 @@ function statsFilterHiddenInputs(filters) {
     .filter(([, value]) => value)
     .map(([name, value]) => `<input type="hidden" name="${name}" value="${esc(value)}">`)
     .join("");
+}
+
+function recipientFilterHiddenInputs(filters) {
+  const values = {
+    campaign: filters.campaignId,
+    media: filters.mediaId,
+    from: filters.dateFromInput,
+    to: filters.dateToInput
+  };
+  return Object.entries(values)
+    .filter(([, value]) => value)
+    .map(([name, value]) => `<input type="hidden" name="${name}" value="${esc(value)}">`)
+    .join("");
+}
+
+function renderRecipientRow(recipient) {
+  return `<tr>
+    <td>${esc(formatDate(recipient.createdAt))}</td>
+    <td>${esc(recipient.instagramUserId || recipient._id || "—")}</td>
+    <td>${esc(recipient.campaignName || recipient.campaignId || "Без кампании")}</td>
+    <td>${esc(recipient.mediaId || "—")}</td>
+    <td>${esc(recipient.source || "—")}</td>
+    <td>${esc(recipient.firstCommentId || "—")}</td>
+  </tr>`;
 }
 
 function renderCampaignStatsRow(item, filters) {
@@ -1323,6 +1442,7 @@ function normalizeCampaignForm(form, config, index = 0) {
         directMessages: form.directMessages === "on",
         shares: form.shares === "on"
       },
+      recipientDedupeEnabled: form.recipientDedupeEnabled === "on",
       publicReplyEnabled: form.publicReplyEnabled === "on",
       publicCommentReply: form.publicCommentReply,
       directMessage: {
@@ -1383,6 +1503,7 @@ function normalizeAdminCampaign(campaign, config, index) {
         directMessages: Boolean(instagram.enabledTriggers?.directMessages),
         shares: Boolean(instagram.enabledTriggers?.shares)
       },
+      recipientDedupeEnabled: instagram.recipientDedupeEnabled !== false,
       publicReplyEnabled: useDefaultInstagramMessage ? Boolean(config.instagram?.publicReplyEnabled) : Boolean(instagram.publicReplyEnabled),
       publicCommentReply: String(useDefaultInstagramMessage ? config.instagram?.publicCommentReply || "" : instagram.publicCommentReply || config.instagram?.publicCommentReply || ""),
       directMessage: {
@@ -1799,6 +1920,11 @@ function renderCampaignEditor(config, campaign, existing, posts = [], mediaFiles
             <label class="choice-card"><input name="shares" type="checkbox" ${checked(triggers.shares)}><strong>Share / Repost</strong><small>Запустить сценарий, когда публикацией поделились.</small></label>
           </div>
 
+          <div id="recipientDedupeBlock" class="status-line conditional ${triggers.comments ? "" : "is-hidden"}">
+            <div><strong>Не отправлять повторно под одним Reels</strong><br><small>Пользователь сможет получить Direct один раз на каждом Reels. Выключите, чтобы отвечать на каждый новый подходящий комментарий.</small></div>
+            <label class="toggle" style="margin:0">Фильтр повторов <input name="recipientDedupeEnabled" type="checkbox" ${checked(campaign.instagram?.recipientDedupeEnabled !== false)}></label>
+          </div>
+
           <div class="scope-box">
             <div class="scope-head"><div><strong>Какие публикации?</strong><br><small>Пустой выбор больше не означает что-то случайное.</small></div>
               <div class="segmented"><label><input type="radio" name="postScope" value="any" ${checked(!selectedMediaIds.size)}>Все</label><label><input type="radio" name="postScope" value="selected" ${checked(Boolean(selectedMediaIds.size))}>Выбранные</label></div>
@@ -1913,6 +2039,7 @@ function renderCampaignEditor(config, campaign, existing, posts = [], mediaFiles
         toggleDetails("postScope", "selected", "postPickerDetails");
         toggleDetails("keywordScope", "selected", "keywordDetails");
         document.getElementById("publicReplyBlock").classList.toggle("is-hidden", !form.elements.comments.checked);
+        document.getElementById("recipientDedupeBlock").classList.toggle("is-hidden", !form.elements.comments.checked);
       }
       function syncMediaIds() {
         if (selectedValue("postScope") === "any") {
@@ -1953,7 +2080,10 @@ function renderCampaignEditor(config, campaign, existing, posts = [], mediaFiles
         const keywords = selectedValue("keywordScope") === "any" ? [] : valuesList(form.elements.keywords.value);
         document.getElementById("reviewName").textContent = form.elements.name.value.trim() || "Без названия";
         document.getElementById("reviewTriggers").textContent = triggerLabels.join(", ") || "Не выбрано";
-        document.getElementById("reviewScope").textContent = (media.length ? media.length + " выбранных публикаций" : "все публикации") + "; " + (keywords.length ? keywords.length + " ключевых слов" : "любой текст");
+        const dedupeSummary = form.elements.comments.checked
+          ? (form.elements.recipientDedupeEnabled.checked ? "; один Direct пользователю на каждый Reels" : "; повторы разрешены")
+          : "";
+        document.getElementById("reviewScope").textContent = (media.length ? media.length + " выбранных публикаций" : "все публикации") + "; " + (keywords.length ? keywords.length + " ключевых слов" : "любой текст") + dedupeSummary;
         document.getElementById("reviewInstagram").textContent = selectedValue("instagramMessageMode") === "default" ? "стандартный ответ" : "собственный ответ";
         document.getElementById("reviewTelegram").textContent = selectedValue("telegramMode") === "default" ? "стандартный сценарий" : "индивидуальный сценарий";
         document.getElementById("reviewLanding").textContent = selectedValue("landingMode") === "default" ? "стандартный лендинг" : form.elements.landingUrl.value.trim();

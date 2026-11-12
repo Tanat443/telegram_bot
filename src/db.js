@@ -250,7 +250,7 @@ export async function getStats(filters = {}) {
     db.collection("events").countDocuments(query),
     db.collection("events").countDocuments(events24hQuery),
     db.collection("events").distinct("telegramId", query),
-    db.collection("instagram_recipients").countDocuments(filters.campaignId ? { campaignId: filters.campaignId } : {}),
+    db.collection("instagram_recipients").countDocuments(recipientQuery(filters)),
     db.collection("events").aggregate([
       { $match: query },
       { $group: { _id: "$type", count: { $sum: 1 } } },
@@ -327,12 +327,63 @@ export async function getStats(filters = {}) {
   };
 }
 
+export async function listInstagramRecipients(filters = {}, limit = 200) {
+  const db = await getDb();
+  if (!db) return [];
+
+  await ensureIndexes(db);
+  const safeLimit = Math.max(1, Math.min(Number(limit) || 200, 100000));
+  const recipients = await db.collection("instagram_recipients")
+    .find(recipientQuery(filters), {
+      projection: {
+        instagramUserId: 1,
+        campaignId: 1,
+        campaignName: 1,
+        mediaId: 1,
+        source: 1,
+        firstCommentId: 1,
+        createdAt: 1
+      }
+    })
+    .sort({ createdAt: -1 })
+    .limit(safeLimit)
+    .toArray();
+
+  return recipients.map((recipient) => ({
+    ...recipient,
+    _id: String(recipient._id),
+    createdAt: recipient.createdAt?.toISOString?.() || recipient.createdAt
+  }));
+}
+
+export async function clearInstagramRecipients(filters = {}) {
+  const db = await getDb();
+  if (!db) return 0;
+
+  const result = await db.collection("instagram_recipients").deleteMany(recipientQuery(filters));
+  return result.deletedCount || 0;
+}
+
 export async function clearStats(filters = {}) {
   const db = await getDb();
   if (!db) return 0;
 
   const result = await db.collection("events").deleteMany(statsQuery(filters));
   return result.deletedCount || 0;
+}
+
+function recipientQuery(filters) {
+  const query = {};
+  if (filters.campaignId) query.campaignId = String(filters.campaignId);
+  if (filters.mediaId) query.mediaId = String(filters.mediaId);
+
+  const createdAt = {};
+  const dateFrom = validDate(filters.dateFrom);
+  const dateTo = validDate(filters.dateTo);
+  if (dateFrom) createdAt.$gte = dateFrom;
+  if (dateTo) createdAt.$lt = dateTo;
+  if (Object.keys(createdAt).length) query.createdAt = createdAt;
+  return query;
 }
 
 function statsQuery(filters) {
@@ -483,6 +534,7 @@ async function ensureIndexes(db) {
     db.collection("processed_events").createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
     db.collection("instagram_recipients").createIndex({ createdAt: -1 }),
     db.collection("instagram_recipients").createIndex({ campaignId: 1, instagramUserId: 1 }),
+    db.collection("instagram_recipients").createIndex({ campaignId: 1, mediaId: 1, createdAt: -1 }),
     db.collection("campaigns").createIndex({ status: 1, priority: -1, updatedAt: -1 }),
     db.collection("campaigns").createIndex({ status: 1, "telegram.startPayload": 1 }),
     db.collection("campaigns").createIndex({ status: 1, mediaIds: 1 }),

@@ -53,11 +53,12 @@ export class MetaClient {
         continue;
       }
 
-      const recipientKey = actorId ? instagramRecipientKey(actorId, campaign.id) : "";
-      if (actorId) {
-        const alreadyContacted = await this.hasCampaignRecipient(actorId, campaign.id);
+      const recipientDedupeEnabled = campaignConfig.instagram.recipientDedupeEnabled !== false;
+      const recipientKey = actorId && recipientDedupeEnabled ? instagramRecipientKey(actorId, campaign.id, mediaId) : "";
+      if (actorId && recipientDedupeEnabled) {
+        const alreadyContacted = await this.hasCommentRecipient(actorId, campaign.id, mediaId);
         if (alreadyContacted === true) {
-          console.log(`Skipped already contacted Instagram commenter: ${actorId}; campaign=${campaign.id}`);
+          console.log(`Skipped already contacted Instagram commenter: ${actorId}; campaign=${campaign.id}; media=${mediaId}`);
           await recordEvent("instagram_recipient_duplicate_skipped", campaignEvent(campaign, {
             source: "comment",
             instagramUserId: actorId,
@@ -172,6 +173,10 @@ export class MetaClient {
     if (alreadyContacted === true || campaignId !== "default") return alreadyContacted;
 
     return hasInstagramRecipient(`instagram:${instagramUserId}`);
+  }
+
+  async hasCommentRecipient(instagramUserId, campaignId, mediaId) {
+    return hasInstagramRecipient(instagramRecipientKey(instagramUserId, campaignId, mediaId));
   }
 
   async privateReplyToComment(commentId, config, context = {}) {
@@ -368,8 +373,9 @@ function getCommentMediaId(value) {
   return String(value.media?.id || value.media_id || value.media?.media_id || "");
 }
 
-function instagramRecipientKey(instagramUserId, campaignId) {
-  return `instagram:${instagramUserId}:campaign:${campaignId || "default"}`;
+function instagramRecipientKey(instagramUserId, campaignId, mediaId = "") {
+  const campaignKey = `instagram:${instagramUserId}:campaign:${campaignId || "default"}`;
+  return mediaId ? `${campaignKey}:media:${mediaId}` : campaignKey;
 }
 
 function campaignEvent(campaign, payload = {}) {
